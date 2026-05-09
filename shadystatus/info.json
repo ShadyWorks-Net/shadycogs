@@ -1,0 +1,15 @@
+{
+    "author": ["ShadyTidus"],
+    "name": "ShadyStatus",
+    "short": "Multi-game server status with game-specific formatting",
+    "description": "Query game servers via Steam A2S protocol and display status with game-specific formatting. Supports 7 Days to Die, ARK, Rust, Valheim, Project Zomboid, V Rising, and generic A2S servers. Features autocomplete, per-user rate limiting, and optional status channel.",
+    "install_msg": "ShadyStatus installed!\n\nSetup:\n1. Add servers: `[p]shadystatus add <name> <ip> <port> <game>`\n2. Users query with: `/server <name>` (with autocomplete)\n\nSupported games: 7dtd, ark, rust, valheim, pz, vrising, generic",
+    "end_user_data_statement": "This cog temporarily stores query timestamps for rate limiting (in memory only).",
+    "tags": ["gaming", "server", "status", "7dtd", "ark", "rust", "valheim", "a2s", "query"],
+    "requirements": ["python-a2s"],
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0],
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

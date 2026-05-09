@@ -1,0 +1,12 @@
+{
+    "author": ["ShadyTidus"],
+    "name": "ShadyAlts",
+    "short": "Alt account tracking and network visualization",
+    "description": "Track alt accounts with bidirectional linking, network visualization, and join/leave notifications. Supports both in-server members and out-of-server users by ID. Features configurable moderator roles and reason tracking.",
+    "install_msg": "ShadyAlts installed!\n\nCommands (slash only):\n- `/alt` - Manage alts for server members\n- `/altid` - Manage alts by user ID\n- `/altset` - Configure settings\n\nSetup:\n1. `/altset channel` - Set mod log channel\n2. `/altset addrole` - Add mod roles (optional)",
+    "end_user_data_statement": "This cog stores user IDs of linked alt accounts, the moderator who linked them, reasons, and timestamps.",
+    "tags": ["moderation", "alts", "alt detection", "security", "tracking"],
+    "type": "COG",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0]
+}

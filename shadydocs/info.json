@@ -1,0 +1,12 @@
+{
+    "author": ["ShadyTidus"],
+    "name": "ShadyDocs",
+    "short": "In-Discord wiki and documentation system",
+    "description": "Simple in-Discord documentation/wiki for servers without external hosting. Create, edit, and organize doc pages with categories. Features clean embed presentation, modal-based editing, autocomplete, search, and support for embed fields and images.",
+    "install_msg": "ShadyDocs installed!\n\nUser Commands:\n- `/doc <name>` - View a doc page (with autocomplete)\n- `/docs` - List all pages by category\n- `/docsearch <query>` - Search pages\n\nAdmin Commands:\n- `/docset add` - Create new page (opens modal)\n- `/docset edit <name>` - Edit existing page\n- `/docset delete <name>` - Delete page\n- `/docset addcategory <name>` - Create category\n- `/docset setcategory <page> <category>` - Organize page",
+    "end_user_data_statement": "This cog stores documentation content, page metadata, and the user IDs of page authors/editors.",
+    "tags": ["wiki", "documentation", "docs", "help", "info", "knowledge base"],
+    "type": "COG",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0]
+}

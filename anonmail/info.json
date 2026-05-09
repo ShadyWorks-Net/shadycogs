@@ -1,0 +1,12 @@
+{
+    "author": ["ShadyTidus"],
+    "name": "AnonMail",
+    "short": "Anonymous feedback submission system",
+    "description": "Anonymous feedback system with abuse prevention. Users select a recipient from a configurable role and submit anonymous feedback via modal. Features per-user cooldowns and a ban list for repeat abusers. Feedback is posted to dedicated threads.",
+    "install_msg": "AnonMail installed!\n\nSetup:\n1. `[p]anonmailset channel #feedback`\n2. `[p]anonmailset recipientrole @Role`\n3. `[p]anonmailset enable true`\n\nOptional:\n- `[p]anonmailset cooldown 60` - Set cooldown in minutes\n- `[p]anonmailset senderrole @Role` - Restrict who can send\n- `[p]anonmailset ban @user` - Ban abusers\n\nUsers use `[p]feedback` to submit.",
+    "end_user_data_statement": "This cog stores user IDs of banned users and temporarily tracks cooldowns in memory. Feedback content is anonymous.",
+    "tags": ["feedback", "anonymous", "moderation", "threads"],
+    "type": "COG",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0]
+}

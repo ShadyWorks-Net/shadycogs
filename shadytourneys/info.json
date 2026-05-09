@@ -1,0 +1,13 @@
+{
+    "author": ["ShadyTidus"],
+    "name": "ShadyTourneys",
+    "short": "Tournament and bracket management with Challonge integration",
+    "description": "Comprehensive tournament management with solo/team modes, multiple bracket formats (single/double elimination, round robin), and Challonge API integration for hosted brackets. Features bracket visualization, match reporting, prize pool tracking, and persistent signup views.",
+    "install_msg": "ShadyTourneys installed!\n\n**User Commands:**\n- `/tourney` - Create or list tournaments\n- `/tourneymanage` - Start, cancel, view brackets, report matches\n\n**Admin Commands:**\n- `/tourneyset` - Configure guild settings\n\n**Bot Owner Setup (Challonge):**\n1. Get API key from https://challonge.com/settings/developer\n2. Run: `/challongeset credentials <username> <api_key>`\n3. Check status: `/challongeset status`",
+    "end_user_data_statement": "This cog stores tournament data including user IDs of participants, team compositions, match results, and tournament metadata. Challonge API credentials are stored globally.",
+    "tags": ["tournament", "bracket", "competition", "esports", "teams", "events", "challonge"],
+    "requirements": ["pychallonge"],
+    "type": "COG",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0]
+}

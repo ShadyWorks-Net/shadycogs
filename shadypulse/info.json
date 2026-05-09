@@ -1,0 +1,15 @@
+{
+    "author": ["ShadyTidus"],
+    "name": "ShadyPulse",
+    "short": "Comprehensive health monitoring for bot, services, and cogs",
+    "description": "Monitor bot health (latency, uptime), external HTTP services, and other cogs. Features dashboard command, alert channels, uptime statistics, and optional cog auto-reload on failure. Detects cog crashes and can automatically attempt to reload them.",
+    "install_msg": "ShadyPulse installed!\n\nCommands:\n- `[p]pulse` - View health dashboard\n- `[p]uptime` - Show bot uptime\n- `[p]shadypulse` - Admin configuration\n\nSetup:\n1. Set alert channel: `[p]shadypulse alertchannel #channel`\n2. Add HTTP services: `[p]shadypulse http add <name> <url>`\n3. Monitor cogs: `[p]shadypulse cog add <CogName>`",
+    "end_user_data_statement": "This cog stores service status history and configuration. No user data is collected.",
+    "tags": ["monitoring", "health", "uptime", "status", "alerts", "cogs", "watchdog"],
+    "requirements": ["aiohttp"],
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0],
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

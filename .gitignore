@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude/Internal
+.claude/
+review.md
+review-detailed.md
+nul
+
+# Test files
+test_cogs.py
+
+# Private/PA-only cogs (not for public release)
+wiki/
+karaoke/
+
+# Deprecated/renamed cogs (kept locally for reference)
+heartbeat/
+shadytime/
+shadyevents/
+
+# Moved to separate repo
+shadycheatsheet/
+
+# Not maintained
+shadygiveaway/
+shadyresponse/
+shadystripper/
+
+# Other
+fivetools-api/

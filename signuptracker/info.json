@@ -1,0 +1,12 @@
+{
+    "author": ["ShadyTidus"],
+    "description": "Track reactions on announcement posts with persistent storage, signup history, statistics, export functionality, and deadline reminders. Creates an ordered list of who reacted first (first-come-first-served tracking).",
+    "install_msg": "SignupTracker cog installed. Use [p]signuptracker to configure.\n\nFeatures:\n- Persistent signup tracking (survives restarts)\n- Signup history with statistics\n- Export to JSON/CSV\n- Deadline reminders\n- First-come-first-served order tracking",
+    "short": "Track reactions on announcements with history",
+    "name": "SignupTracker",
+    "tags": ["reactions", "signups", "tracker", "announcements", "events", "rsvp"],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores channel IDs, user IDs of signups, signup timestamps, and signup history.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0]
+}

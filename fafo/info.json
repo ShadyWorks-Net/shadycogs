@@ -1,0 +1,12 @@
+{
+    "author": ["ShadyTidus"],
+    "description": "FAFO (Find Around Find Out) moderation button. Posts a warning message with a button that times out users who click it.",
+    "install_msg": "FAFO cog installed. Use [p]fafo to post a warning message.",
+    "short": "FAFO timeout button for moderation",
+    "name": "Fafo",
+    "tags": ["moderation", "timeout", "button"],
+    "type": "COG",
+    "end_user_data_statement": "This cog does not store any user data.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0]
+}

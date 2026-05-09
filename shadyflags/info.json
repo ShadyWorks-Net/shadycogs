@@ -1,0 +1,12 @@
+{
+    "author": ["ShadyTidus"],
+    "name": "ShadyFlags",
+    "short": "Temporary warning/flag system with auto-flagging",
+    "description": "Comprehensive flag system for tracking suspicious accounts. Auto-flags new accounts based on age thresholds with critical/high/medium priorities. Features flag review queue UI, statistics/metrics, configurable moderator roles, and decision logging for ML training data.",
+    "install_msg": "ShadyFlags installed!\n\nCommands:\n- `/flag` - Manage flags for server members\n- `/flagid` - Manage flags by user ID\n- `/flagall` - View all flagged members\n- `/flagqueue` - Review flagged users with action buttons\n- `/flagstats` - View flag statistics\n- `/flagset` - Configure settings\n\nSetup:\n1. `/flagset channel` - Set mod log channel\n2. `/flagset addrole` - Add mod roles (optional)",
+    "end_user_data_statement": "This cog stores user IDs of flagged users, flag reasons, moderator IDs who created flags, timestamps, and flag decision history.",
+    "tags": ["moderation", "flags", "alt detection", "security", "new accounts", "warnings"],
+    "type": "COG",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0]
+}

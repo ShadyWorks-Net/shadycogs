@@ -1,0 +1,15 @@
+{
+    "author": ["ShadyTidus"],
+    "install_msg": "ShadyVoiceMod installed!\n\nSetup:\n1. Set log channel: `[p]vmodset logchannel #mod-logs`\n2. Add mod roles (optional): `[p]vmodset addrole @Moderator`\n\nCommands:\n- `/vmute` or `[p]vmute` - Voice mute a user\n- `/vunmute` or `[p]vunmute` - Remove a voice mute\n- `/vmutes` or `[p]vmutes` - List active mutes\n\nUse `[p]vmodinfo` for full help.",
+    "name": "ShadyVoiceMod",
+    "short": "Voice moderation with timed mutes and audit logging",
+    "description": "Comprehensive voice moderation with timed voice mutes, automatic expiry, DM notifications to affected users, audit logging, modal-based UI, and configurable moderator roles. Handles pending mutes for users not in voice and supports mute extensions.",
+    "end_user_data_statement": "This cog stores user IDs and guild IDs to track active voice mutes. Mute data includes the moderator ID, reason, expiry time, and application status. This data is automatically removed when mutes expire or are manually lifted.",
+    "tags": ["moderation", "voice", "mute", "timeout", "admin"],
+    "requirements": [],
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0],
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}

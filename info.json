@@ -1,0 +1,7 @@
+{
+    "author": ["ShadyTidus"],
+    "name": "ShadyCogs",
+    "short": "Collection of utility, moderation, and event management cogs",
+    "description": "A collection of Red-DiscordBot cogs for moderation, events, server utilities, and more. Features tournament management with Challonge integration, voice moderation, alt tracking, anonymous feedback, game server status, and health monitoring.",
+    "install_msg": "Thanks for using ShadyCogs!\n\nBrowse available cogs with: `[p]cog list shadycogs`\nInstall a cog with: `[p]cog install shadycogs <cogname>`\n\nFor support, visit: https://github.com/ShadyWorks-Net/shadycogs"
+}
