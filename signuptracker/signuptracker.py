@@ -58,11 +58,29 @@ class SignupTracker(commands.Cog):
             # History of completed signups
             "history": [],  # List of completed signup records
             "max_history": 50,  # Max history entries to keep
+            "mod_roles": [],  # Roles that can manage signups
         }
         self.config.register_guild(**default_guild)
 
         # Background task for deadline reminders
         self.deadline_task: Optional[asyncio.Task] = None
+
+    async def is_authorized(self, ctx: commands.Context) -> bool:
+        """Check if user has permission to manage signups."""
+        if not isinstance(ctx.author, discord.Member):
+            return False
+
+        # Admin/owner always authorized
+        if ctx.author.guild_permissions.administrator or ctx.author == ctx.guild.owner:
+            return True
+
+        # Check manage_guild permission
+        if ctx.author.guild_permissions.manage_guild:
+            return True
+
+        # Check for configured mod roles
+        mod_roles = await self.config.guild(ctx.guild).mod_roles()
+        return any(role.id in mod_roles for role in ctx.author.roles)
 
     async def cog_load(self) -> None:
         """Start background tasks when cog loads."""
@@ -330,12 +348,15 @@ class SignupTracker(commands.Cog):
     # ==================== ADMIN COMMANDS ====================
 
     @commands.hybrid_group(name="signuptracker", aliases=["st"])
-    @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
     async def signuptracker(self, ctx: commands.Context):
         """Manage signup tracking for announcements."""
-        pass
+        if not await self.is_authorized(ctx):
+            await ctx.send("You don't have permission to manage signup tracker.", ephemeral=True)
+            return
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
 
     @signuptracker.command(name="enable")
     @app_commands.describe(enabled="Enable or disable signup tracking")
@@ -664,3 +685,35 @@ class SignupTracker(commands.Cog):
 
         await self.config.guild(ctx.guild).history.set([])
         await ctx.send("✅ Signup history cleared.")
+
+    @signuptracker.command(name="addrole")
+    @app_commands.describe(role="Role that can manage signup tracker")
+    async def signuptracker_addrole(self, ctx: commands.Context, role: discord.Role):
+        """Add a role that can manage signup tracker."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("Only administrators can manage mod roles.", ephemeral=True)
+            return
+
+        async with self.config.guild(ctx.guild).mod_roles() as roles:
+            if role.id in roles:
+                await ctx.send(f"{role.mention} is already a mod role.", ephemeral=True)
+                return
+            roles.append(role.id)
+
+        await ctx.send(f"✅ {role.mention} can now manage signup tracker.")
+
+    @signuptracker.command(name="removerole")
+    @app_commands.describe(role="Role to remove from signup tracker management")
+    async def signuptracker_removerole(self, ctx: commands.Context, role: discord.Role):
+        """Remove a role from signup tracker management."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("Only administrators can manage mod roles.", ephemeral=True)
+            return
+
+        async with self.config.guild(ctx.guild).mod_roles() as roles:
+            if role.id not in roles:
+                await ctx.send(f"{role.mention} is not a mod role.", ephemeral=True)
+                return
+            roles.remove(role.id)
+
+        await ctx.send(f"✅ {role.mention} can no longer manage signup tracker.")

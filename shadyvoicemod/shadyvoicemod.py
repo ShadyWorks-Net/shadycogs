@@ -705,8 +705,13 @@ class ShadyVoiceMod(commands.Cog):
     # Commands - Voice Mute Management
     # -------------------------------------------------------------------------
 
-    @commands.command(name="vmute")
+    @commands.hybrid_command(name="vmute")
     @commands.guild_only()
+    @app_commands.describe(
+        member="The member to voice mute",
+        duration="Duration (e.g., 30m, 2h, 1d)",
+        reason="Reason for the mute"
+    )
     async def voice_mute(
         self,
         ctx: commands.Context,
@@ -715,15 +720,7 @@ class ShadyVoiceMod(commands.Cog):
         *,
         reason: str,
     ):
-        """
-        Voice mute a user for a specified duration.
-
-        Duration formats: 30s, 5m, 2h, 1d, 1w (can combine: 1h30m)
-
-        Examples:
-            [p]vmute @user 30m Being disruptive in voice
-            [p]vmute @user 2h Mic spamming
-        """
+        """Voice mute a user for a specified duration."""
         # Check authorization
         if not await self.is_authorized(ctx):
             return await ctx.send("You do not have permission to use this command.")
@@ -841,16 +838,14 @@ class ShadyVoiceMod(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    @commands.command(name="vunmute")
+    @commands.hybrid_command(name="vunmute")
     @commands.guild_only()
+    @app_commands.describe(
+        member="The member to unmute",
+        reason="Reason for the unmute"
+    )
     async def voice_unmute(self, ctx: commands.Context, member: discord.Member, *, reason: str = "Manual unmute"):
-        """
-        Manually remove a voice mute from a user.
-
-        Examples:
-            [p]vunmute @user
-            [p]vunmute @user Appealed successfully
-        """
+        """Remove a voice mute from a user."""
         # Check authorization
         if not await self.is_authorized(ctx):
             return await ctx.send("You do not have permission to use this command.")
@@ -892,7 +887,7 @@ class ShadyVoiceMod(commands.Cog):
 
         await ctx.send(f"✅ Voice mute removed from {member.mention}.")
 
-    @commands.command(name="vmutes")
+    @commands.hybrid_command(name="vmutes")
     @commands.guild_only()
     async def list_voice_mutes(self, ctx: commands.Context):
         """List all active and pending voice mutes."""
@@ -1023,7 +1018,7 @@ class ShadyVoiceMod(commands.Cog):
     # Info Command
     # -------------------------------------------------------------------------
 
-    @commands.command(name="vmodinfo")
+    @commands.hybrid_command(name="vmodinfo")
     @commands.guild_only()
     async def vmod_info(self, ctx: commands.Context):
         """Show ShadyVoiceMod information and commands."""
@@ -1036,11 +1031,11 @@ class ShadyVoiceMod(commands.Cog):
         embed.add_field(
             name="Commands",
             value=(
-                f"`{ctx.prefix}vmute <user> <duration> <reason>` - Voice mute a user\n"
-                f"`{ctx.prefix}vunmute <user> [reason]` - Remove a voice mute\n"
-                f"`{ctx.prefix}vmutes` - List active voice mutes\n"
-                f"`{ctx.prefix}vmodset` - Configure settings\n"
-                f"`{ctx.prefix}vmodinfo` - This help message"
+                "`/vmute <user> <duration> <reason>` - Voice mute a user\n"
+                "`/vunmute <user> [reason]` - Remove a voice mute\n"
+                "`/vmutes` - List active voice mutes\n"
+                "`/vmodset` - Configure settings\n"
+                "`/vmodinfo` - This help message"
             ),
             inline=False,
         )

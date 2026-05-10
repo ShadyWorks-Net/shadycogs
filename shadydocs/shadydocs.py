@@ -151,6 +151,7 @@ class ShadyDocs(commands.Cog):
             "pages": {},  # name -> {title, content, category, fields, created_at, created_by, updated_at, updated_by}
             "categories": [],  # List of category names
             "embed_color": 0x3498db,  # Default blue
+            "mod_roles": [],  # Roles that can manage documentation
         }
 
         # Page structure:
@@ -168,6 +169,19 @@ class ShadyDocs(commands.Cog):
         # }
 
         self.config.register_guild(**default_guild)
+
+    async def is_authorized(self, interaction: discord.Interaction) -> bool:
+        """Check if user has permission to manage documentation."""
+        if not isinstance(interaction.user, discord.Member):
+            return False
+
+        # Admin/owner always authorized
+        if interaction.user.guild_permissions.administrator or interaction.user == interaction.guild.owner:
+            return True
+
+        # Check for configured mod roles
+        mod_roles = await self.config.guild(interaction.guild).mod_roles()
+        return any(role.id in mod_roles for role in interaction.user.roles)
 
     async def save_page(
         self,
@@ -427,8 +441,11 @@ class ShadyDocs(commands.Cog):
         app_commands.Choice(name="Remove Category", value="removecategory"),
         app_commands.Choice(name="List All Pages", value="list"),
         app_commands.Choice(name="Set Embed Color", value="setcolor"),
+        app_commands.Choice(name="Add Mod Role", value="addrole"),
+        app_commands.Choice(name="Remove Mod Role", value="removerole"),
     ])
     @app_commands.autocomplete(name=page_autocomplete, category=category_autocomplete)
+    @app_commands.describe(role="Role for addrole/removerole actions")
     @app_commands.guild_only()
     async def docset(
         self,
@@ -436,13 +453,14 @@ class ShadyDocs(commands.Cog):
         action: str,
         name: Optional[str] = None,
         category: Optional[str] = None,
-        url: Optional[str] = None
+        url: Optional[str] = None,
+        role: Optional[discord.Role] = None
     ):
         """Manage documentation pages."""
-        # Check admin permission
-        if not interaction.user.guild_permissions.administrator:
+        # Check permission
+        if not await self.is_authorized(interaction):
             await interaction.response.send_message(
-                "Only administrators can manage documentation.",
+                "You don't have permission to manage documentation.",
                 ephemeral=True
             )
             return
@@ -684,6 +702,56 @@ class ShadyDocs(commands.Cog):
             await self.config.guild(interaction.guild).embed_color.set(color)
             await interaction.response.send_message(
                 f"✅ Set embed color to `#{color_str}`.", ephemeral=True
+            )
+
+        elif action == "addrole":
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message(
+                    "Only administrators can manage mod roles.", ephemeral=True
+                )
+                return
+
+            if not role:
+                await interaction.response.send_message(
+                    "Please specify a role to add.", ephemeral=True
+                )
+                return
+
+            async with self.config.guild(interaction.guild).mod_roles() as roles:
+                if role.id in roles:
+                    await interaction.response.send_message(
+                        f"{role.mention} is already a mod role.", ephemeral=True
+                    )
+                    return
+                roles.append(role.id)
+
+            await interaction.response.send_message(
+                f"✅ {role.mention} can now manage documentation.", ephemeral=True
+            )
+
+        elif action == "removerole":
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message(
+                    "Only administrators can manage mod roles.", ephemeral=True
+                )
+                return
+
+            if not role:
+                await interaction.response.send_message(
+                    "Please specify a role to remove.", ephemeral=True
+                )
+                return
+
+            async with self.config.guild(interaction.guild).mod_roles() as roles:
+                if role.id not in roles:
+                    await interaction.response.send_message(
+                        f"{role.mention} is not a mod role.", ephemeral=True
+                    )
+                    return
+                roles.remove(role.id)
+
+            await interaction.response.send_message(
+                f"✅ {role.mention} can no longer manage documentation.", ephemeral=True
             )
 
 

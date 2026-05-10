@@ -182,6 +182,7 @@ class AnonMail(commands.Cog):
             "thread_prefix": "Feedback - ",
             "cooldown_minutes": 60,  # Cooldown between feedback submissions
             "banned_users": [],  # List of user IDs banned from sending feedback
+            "mod_roles": [],  # List of role IDs that can manage settings
         }
         self.config.register_guild(**default_guild)
 
@@ -217,6 +218,19 @@ class AnonMail(commands.Cog):
         """Check if user is banned from sending feedback."""
         banned_users = await self.config.guild_from_id(guild_id).banned_users()
         return user_id in banned_users
+
+    async def is_authorized(self, ctx: commands.Context) -> bool:
+        """Check if user has permission to manage settings."""
+        if not isinstance(ctx.author, discord.Member):
+            return False
+
+        # Admin/owner always authorized
+        if ctx.author.guild_permissions.administrator or ctx.author == ctx.guild.owner:
+            return True
+
+        # Check for configured mod roles
+        mod_roles = await self.config.guild(ctx.guild).mod_roles()
+        return any(role.id in mod_roles for role in ctx.author.roles)
 
     @commands.hybrid_command(name="feedback")
     @commands.guild_only()
@@ -291,11 +305,14 @@ class AnonMail(commands.Cog):
 
     @commands.hybrid_group(name="anonmailset")
     @commands.guild_only()
-    @commands.admin_or_permissions(administrator=True)
     @app_commands.default_permissions(administrator=True)
     async def anonmailset(self, ctx: commands.Context):
         """Configure anonymous feedback settings."""
-        pass
+        if not await self.is_authorized(ctx):
+            await ctx.send("You don't have permission to manage AnonMail settings.", ephemeral=True)
+            return
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
 
     @anonmailset.command(name="enable")
     @app_commands.describe(enabled="Enable or disable anonymous feedback")
@@ -401,6 +418,38 @@ class AnonMail(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    @anonmailset.command(name="addrole")
+    @app_commands.describe(role="Role that can manage AnonMail settings")
+    async def anonmailset_addrole(self, ctx: commands.Context, role: discord.Role):
+        """Add a role that can manage AnonMail settings."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("Only administrators can manage mod roles.", ephemeral=True)
+            return
+
+        async with self.config.guild(ctx.guild).mod_roles() as roles:
+            if role.id in roles:
+                await ctx.send(f"❌ {role.mention} is already a mod role.", ephemeral=True)
+                return
+            roles.append(role.id)
+
+        await ctx.send(f"✅ {role.mention} can now manage AnonMail settings.")
+
+    @anonmailset.command(name="removerole")
+    @app_commands.describe(role="Role to remove from AnonMail management")
+    async def anonmailset_removerole(self, ctx: commands.Context, role: discord.Role):
+        """Remove a role from AnonMail management."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("Only administrators can manage mod roles.", ephemeral=True)
+            return
+
+        async with self.config.guild(ctx.guild).mod_roles() as roles:
+            if role.id not in roles:
+                await ctx.send(f"❌ {role.mention} is not a mod role.", ephemeral=True)
+                return
+            roles.remove(role.id)
+
+        await ctx.send(f"✅ {role.mention} can no longer manage AnonMail settings.")
+
     @anonmailset.command(name="show")
     async def anonmailset_show(self, ctx: commands.Context):
         """Show current settings."""
@@ -413,10 +462,17 @@ class AnonMail(commands.Cog):
         prefix = await guild_config.thread_prefix()
         cooldown = await guild_config.cooldown_minutes()
         banned = await guild_config.banned_users()
+        mod_role_ids = await guild_config.mod_roles()
 
         recipient_role = ctx.guild.get_role(recipient_role_id) if recipient_role_id else None
         sender_role = ctx.guild.get_role(sender_role_id) if sender_role_id else None
         channel = ctx.guild.get_channel(channel_id) if channel_id else None
+
+        mod_role_mentions = []
+        for role_id in mod_role_ids:
+            r = ctx.guild.get_role(role_id)
+            if r:
+                mod_role_mentions.append(r.mention)
 
         embed = discord.Embed(
             title="📬 AnonMail Settings",
@@ -445,6 +501,11 @@ class AnonMail(commands.Cog):
             inline=True
         )
         embed.add_field(name="Banned Users", value=str(len(banned)), inline=True)
+        embed.add_field(
+            name="Mod Roles",
+            value=", ".join(mod_role_mentions) if mod_role_mentions else "Admins only",
+            inline=True
+        )
 
         embed.set_footer(text=f"v{self.__version__}")
 

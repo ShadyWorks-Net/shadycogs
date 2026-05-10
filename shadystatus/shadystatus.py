@@ -422,6 +422,7 @@ class ShadyStatus(commands.Cog):
             "servers": {},  # name -> server config
             "rate_limit_seconds": 300,  # 5 minute default rate limit
             "post_channel": None,  # Channel to post results (optional)
+            "mod_roles": [],  # Roles that can manage server configs
         }
 
         # Server config structure:
@@ -438,6 +439,23 @@ class ShadyStatus(commands.Cog):
 
         # Rate limit tracking: guild_id -> {user_id -> {server_name -> timestamp}}
         self._rate_limits: Dict[int, Dict[int, Dict[str, float]]] = {}
+
+    async def is_authorized(self, ctx: commands.Context) -> bool:
+        """Check if user has permission to manage servers."""
+        if not isinstance(ctx.author, discord.Member):
+            return False
+
+        # Admin/owner always authorized
+        if ctx.author.guild_permissions.administrator or ctx.author == ctx.guild.owner:
+            return True
+
+        # Check manage_guild permission
+        if ctx.author.guild_permissions.manage_guild:
+            return True
+
+        # Check for configured mod roles
+        mod_roles = await self.config.guild(ctx.guild).mod_roles()
+        return any(role.id in mod_roles for role in ctx.author.roles)
 
     async def _check_rate_limit(self, guild_id: int, user_id: int, server_name: str) -> Optional[float]:
         """Check if user is rate limited. Returns seconds remaining or None."""
@@ -604,12 +622,15 @@ class ShadyStatus(commands.Cog):
     # ==================== ADMIN COMMANDS ====================
 
     @commands.hybrid_group(name="shadystatus", aliases=["ss"])
-    @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
     async def shadystatus(self, ctx: commands.Context):
         """Manage game server status queries."""
-        pass
+        if not await self.is_authorized(ctx):
+            await ctx.send("You don't have permission to manage server status settings.", ephemeral=True)
+            return
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
 
     @shadystatus.command(name="add")
     @app_commands.describe(
@@ -773,6 +794,38 @@ class ShadyStatus(commands.Cog):
                 await ctx.send("✅ Query successful!", embed=embed)
             except ServerQueryError as e:
                 await ctx.send(f"❌ Query failed: {e}")
+
+    @shadystatus.command(name="addrole")
+    @app_commands.describe(role="Role that can manage server status")
+    async def add_mod_role(self, ctx: commands.Context, role: discord.Role):
+        """Add a role that can manage server status settings."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("Only administrators can manage mod roles.", ephemeral=True)
+            return
+
+        async with self.config.guild(ctx.guild).mod_roles() as roles:
+            if role.id in roles:
+                await ctx.send(f"{role.mention} is already a mod role.", ephemeral=True)
+                return
+            roles.append(role.id)
+
+        await ctx.send(f"✅ {role.mention} can now manage server status settings.")
+
+    @shadystatus.command(name="removerole")
+    @app_commands.describe(role="Role to remove from server status management")
+    async def remove_mod_role(self, ctx: commands.Context, role: discord.Role):
+        """Remove a role from server status management."""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("Only administrators can manage mod roles.", ephemeral=True)
+            return
+
+        async with self.config.guild(ctx.guild).mod_roles() as roles:
+            if role.id not in roles:
+                await ctx.send(f"{role.mention} is not a mod role.", ephemeral=True)
+                return
+            roles.remove(role.id)
+
+        await ctx.send(f"✅ {role.mention} can no longer manage server status settings.")
 
 
 async def setup(bot: Red):
