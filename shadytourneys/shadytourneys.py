@@ -1311,11 +1311,88 @@ class ShadyTourneys(commands.Cog):
         player_stats = await self.config.guild(interaction.guild).player_stats()
         games = list(player_stats.keys())
 
+        # Always include "rivals" as an option
+        if "rivals" not in games:
+            games.insert(0, "rivals")
+
         if not current:
             return [app_commands.Choice(name=g.title(), value=g) for g in games[:25]]
 
         filtered = [g for g in games if current.lower() in g.lower()]
         return [app_commands.Choice(name=g.title(), value=g) for g in filtered[:25]]
+
+    @app_commands.command(name="tourneyseed", description="Set initial seed/ELO for a player (Admin only)")
+    @app_commands.describe(
+        player="Player to seed",
+        seed_rank="Seed rank (1 = highest, sets starting ELO)",
+        game="Game (default: rivals)"
+    )
+    async def tourneyseed(
+        self,
+        interaction: discord.Interaction,
+        player: discord.Member,
+        seed_rank: int,
+        game: str = "rivals"
+    ):
+        """Set initial seed for a player - converts to starting ELO."""
+        if not interaction.user.guild_permissions.administrator:
+            if not await self.is_authorized(interaction):
+                await interaction.response.send_message(
+                    "Only tournament moderators can set player seeds.",
+                    ephemeral=True
+                )
+                return
+
+        if seed_rank < 1 or seed_rank > 100:
+            await interaction.response.send_message(
+                "Seed rank must be between 1 and 100.",
+                ephemeral=True
+            )
+            return
+
+        game_lower = game.lower()
+        user_id_str = str(player.id)
+
+        # Calculate starting ELO based on seed rank
+        # Seed 1 = 1200, Seed 2 = 1150, Seed 3 = 1100, etc.
+        # Formula: 1200 - ((seed_rank - 1) * 50), minimum 1000
+        starting_elo = max(1000, 1200 - ((seed_rank - 1) * 50))
+
+        async with self.config.guild(interaction.guild).player_stats() as player_stats:
+            if game_lower not in player_stats:
+                player_stats[game_lower] = {}
+
+            if user_id_str in player_stats[game_lower]:
+                existing = player_stats[game_lower][user_id_str]
+                if existing.get("matches_played", 0) > 0:
+                    await interaction.response.send_message(
+                        f"⚠️ {player.mention} already has match history in **{game}**.\n"
+                        f"Current ELO: **{existing.get('elo', 1000)}** ({existing.get('matches_played', 0)} matches)\n\n"
+                        f"Initial seeding only works for players with no match history.\n"
+                        f"Their ELO will continue to adjust from match results.",
+                        ephemeral=True
+                    )
+                    return
+
+            # Set initial stats with seeded ELO
+            player_stats[game_lower][user_id_str] = {
+                "elo": starting_elo,
+                "wins": 0,
+                "losses": 0,
+                "matches_played": 0,
+                "tournaments_won": 0,
+                "initial_seed": seed_rank,
+                "seeded_at": datetime.now(timezone.utc).isoformat(),
+                "seeded_by": interaction.user.id,
+            }
+
+        await interaction.response.send_message(
+            f"✅ **{player.display_name}** seeded for **{game.title()}**\n\n"
+            f"**Seed Rank:** #{seed_rank}\n"
+            f"**Starting ELO:** {starting_elo}\n\n"
+            f"Their ELO will adjust naturally from match results.",
+            ephemeral=True
+        )
 
     async def list_tournaments(self, interaction: discord.Interaction) -> None:
         """List all active tournaments."""
