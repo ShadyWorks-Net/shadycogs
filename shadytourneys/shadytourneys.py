@@ -1321,20 +1321,46 @@ class ShadyTourneys(commands.Cog):
         filtered = [g for g in games if current.lower() in g.lower()]
         return [app_commands.Choice(name=g.title(), value=g) for g in filtered[:25]]
 
-    @app_commands.command(name="tourneyseed", description="Set initial seed/ELO for a player (Admin only)")
+    # Marvel Rivals rank to ELO mapping
+    RIVALS_RANK_ELO = {
+        "one_above_all": 1500,
+        "eternity": 1400,
+        "celestial": 1300,
+        "grandmaster": 1200,
+        "diamond": 1100,
+        "platinum": 1050,
+        "gold": 1000,
+        "silver": 950,
+        "bronze": 900,
+        "unranked": 1000,
+    }
+
+    @app_commands.command(name="tourneyseed", description="Set initial seed/ELO for a player based on their Marvel Rivals rank")
     @app_commands.describe(
         player="Player to seed",
-        seed_rank="Seed rank (1 = highest, sets starting ELO)",
+        rank="Player's Marvel Rivals rank",
         game="Game (default: rivals)"
     )
+    @app_commands.choices(rank=[
+        app_commands.Choice(name="One Above All (Top 500)", value="one_above_all"),
+        app_commands.Choice(name="Eternity", value="eternity"),
+        app_commands.Choice(name="Celestial", value="celestial"),
+        app_commands.Choice(name="Grandmaster", value="grandmaster"),
+        app_commands.Choice(name="Diamond", value="diamond"),
+        app_commands.Choice(name="Platinum", value="platinum"),
+        app_commands.Choice(name="Gold", value="gold"),
+        app_commands.Choice(name="Silver", value="silver"),
+        app_commands.Choice(name="Bronze", value="bronze"),
+        app_commands.Choice(name="Unranked", value="unranked"),
+    ])
     async def tourneyseed(
         self,
         interaction: discord.Interaction,
         player: discord.Member,
-        seed_rank: int,
+        rank: app_commands.Choice[str],
         game: str = "rivals"
     ):
-        """Set initial seed for a player - converts to starting ELO."""
+        """Set initial seed for a player based on their Marvel Rivals rank."""
         if not interaction.user.guild_permissions.administrator:
             if not await self.is_authorized(interaction):
                 await interaction.response.send_message(
@@ -1343,20 +1369,11 @@ class ShadyTourneys(commands.Cog):
                 )
                 return
 
-        if seed_rank < 1 or seed_rank > 100:
-            await interaction.response.send_message(
-                "Seed rank must be between 1 and 100.",
-                ephemeral=True
-            )
-            return
-
         game_lower = game.lower()
         user_id_str = str(player.id)
 
-        # Calculate starting ELO based on seed rank
-        # Seed 1 = 1200, Seed 2 = 1150, Seed 3 = 1100, etc.
-        # Formula: 1200 - ((seed_rank - 1) * 50), minimum 1000
-        starting_elo = max(1000, 1200 - ((seed_rank - 1) * 50))
+        # Get starting ELO based on Marvel Rivals rank
+        starting_elo = self.RIVALS_RANK_ELO.get(rank.value, 1000)
 
         async with self.config.guild(interaction.guild).player_stats() as player_stats:
             if game_lower not in player_stats:
@@ -1381,14 +1398,14 @@ class ShadyTourneys(commands.Cog):
                 "losses": 0,
                 "matches_played": 0,
                 "tournaments_won": 0,
-                "initial_seed": seed_rank,
+                "initial_rank": rank.value,
                 "seeded_at": datetime.now(timezone.utc).isoformat(),
                 "seeded_by": interaction.user.id,
             }
 
         await interaction.response.send_message(
             f"✅ **{player.display_name}** seeded for **{game.title()}**\n\n"
-            f"**Seed Rank:** #{seed_rank}\n"
+            f"**Rank:** {rank.name}\n"
             f"**Starting ELO:** {starting_elo}\n\n"
             f"Their ELO will adjust naturally from match results.",
             ephemeral=True
