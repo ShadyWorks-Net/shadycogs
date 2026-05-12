@@ -353,7 +353,6 @@ class SignupTracker(commands.Cog):
 
     @commands.hybrid_group(name="signuptracker", aliases=["st"])
     @commands.guild_only()
-    @app_commands.default_permissions(manage_guild=True)
     async def signuptracker(self, ctx: commands.Context):
         """Manage signup tracking for announcements."""
         if not await self.is_authorized(ctx):

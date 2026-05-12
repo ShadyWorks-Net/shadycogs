@@ -911,7 +911,6 @@ class ShadyVoiceMod(commands.Cog):
     @commands.hybrid_group(name="vmodset")
     @commands.guild_only()
     @checks.admin_or_permissions(administrator=True)
-    @app_commands.default_permissions(administrator=True)
     async def vmod_settings(self, ctx: commands.Context):
         """ShadyVoiceMod settings."""
         if ctx.invoked_subcommand is None:

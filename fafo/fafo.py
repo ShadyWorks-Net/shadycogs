@@ -111,7 +111,6 @@ class Fafo(commands.Cog):
 
     @commands.hybrid_command(name="fafo")
     @commands.guild_only()
-    @app_commands.default_permissions(moderate_members=True)
     async def fafo_command(self, ctx: commands.Context):
         """Post a warning message with a FAFO button that times out clickers."""
         if not await self.is_authorized(ctx):
@@ -133,7 +132,6 @@ class Fafo(commands.Cog):
 
     @commands.hybrid_group(name="fafoset")
     @commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def fafoset(self, ctx: commands.Context):
         """Configure FAFO settings."""
         if not await self.is_authorized(ctx):

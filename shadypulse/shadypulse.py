@@ -608,7 +608,6 @@ class ShadyPulse(commands.Cog):
 
     @commands.hybrid_group(name="shadypulse", aliases=["sp"])
     @commands.is_owner()
-    @app_commands.default_permissions(administrator=True)
     async def shadypulse(self, ctx: commands.Context):
         """Manage health monitoring."""
         pass

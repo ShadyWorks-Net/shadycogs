@@ -309,7 +309,6 @@ class AnonMail(commands.Cog):
 
     @commands.hybrid_group(name="anonmailset")
     @commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
     async def anonmailset(self, ctx: commands.Context):
         """Configure anonymous feedback settings."""
         if not await self.is_authorized(ctx):

@@ -627,7 +627,6 @@ class ShadyStatus(commands.Cog):
 
     @commands.hybrid_group(name="shadystatus", aliases=["ss"])
     @commands.guild_only()
-    @app_commands.default_permissions(manage_guild=True)
     async def shadystatus(self, ctx: commands.Context):
         """Manage game server status queries."""
         if not await self.is_authorized(ctx):
