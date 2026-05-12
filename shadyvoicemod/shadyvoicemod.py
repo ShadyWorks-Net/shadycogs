@@ -362,6 +362,10 @@ class ShadyVoiceMod(commands.Cog):
             user = ctx_or_interaction.user
             guild = ctx_or_interaction.guild
 
+        # Bot owner always authorized
+        if await self.bot.is_owner(user):
+            return True
+
         # Must be a Member (not User) to check permissions
         if not isinstance(user, discord.Member):
             return False

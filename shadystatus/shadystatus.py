@@ -442,10 +442,14 @@ class ShadyStatus(commands.Cog):
 
     async def is_authorized(self, ctx: commands.Context) -> bool:
         """Check if user has permission to manage servers."""
+        # Bot owner always authorized
+        if await self.bot.is_owner(ctx.author):
+            return True
+
         if not isinstance(ctx.author, discord.Member):
             return False
 
-        # Admin/owner always authorized
+        # Admin/guild owner always authorized
         if ctx.author.guild_permissions.administrator or ctx.author == ctx.guild.owner:
             return True
 

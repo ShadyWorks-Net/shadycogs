@@ -146,10 +146,14 @@ class ShadyFlags(commands.Cog):
 
     async def is_authorized(self, interaction: discord.Interaction) -> bool:
         """Check if user has permission to manage flags."""
+        # Bot owner always authorized
+        if await self.bot.is_owner(interaction.user):
+            return True
+
         if not isinstance(interaction.user, discord.Member):
             return False
 
-        # Admin/owner always authorized
+        # Admin/guild owner always authorized
         if interaction.user.guild_permissions.administrator or interaction.user == interaction.guild.owner:
             return True
 
