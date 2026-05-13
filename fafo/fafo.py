@@ -213,6 +213,32 @@ class Fafo(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    @fafoset.command(name="listroles")
+    @app_commands.describe()
+    async def fafoset_listroles(self, ctx: commands.Context):
+        """List all roles that can use FAFO commands."""
+        mod_roles = await self.config.guild(ctx.guild).mod_roles()
+
+        if not mod_roles:
+            await ctx.send("No mod roles configured. Admins and users with `moderate_members` permission can use FAFO.")
+            return
+
+        role_mentions = []
+        for role_id in mod_roles:
+            role = ctx.guild.get_role(role_id)
+            if role:
+                role_mentions.append(role.mention)
+            else:
+                role_mentions.append(f"Unknown ({role_id})")
+
+        embed = discord.Embed(
+            title="FAFO Mod Roles",
+            description="\n".join(role_mentions),
+            color=discord.Color.red(),
+        )
+        embed.set_footer(text="Admins and moderate_members permission can always use FAFO")
+        await ctx.send(embed=embed)
+
 
 async def setup(bot: Red) -> None:
     """Load the FAFO cog."""

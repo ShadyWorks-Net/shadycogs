@@ -270,12 +270,35 @@ class ShadyPulse(commands.Cog):
         if m: parts.append(f"{m}m")
         return " ".join(parts) or "< 1m"
 
-    # ==================== USER COMMANDS ====================
+    async def is_authorized(self, interaction: discord.Interaction) -> bool:
+        """Check if user has permission to view health status."""
+        # Bot owner always authorized
+        if await self.bot.is_owner(interaction.user):
+            return True
+
+        if not isinstance(interaction.user, discord.Member):
+            return False
+
+        # Admin/guild owner always authorized
+        if interaction.user.guild_permissions.administrator or interaction.user == interaction.guild.owner:
+            return True
+
+        # Check manage_guild permission
+        if interaction.user.guild_permissions.manage_guild:
+            return True
+
+        return False
+
+    # ==================== STAFF COMMANDS ====================
 
     @app_commands.command(name="pulse", description="Health monitoring dashboard")
     @app_commands.guild_only()
     async def pulse_dashboard(self, interaction: discord.Interaction):
-        """Show health dashboard."""
+        """Show health dashboard (mod-only)."""
+        if not await self.is_authorized(interaction):
+            await interaction.response.send_message("You don't have permission to view health status.", ephemeral=True)
+            return
+
         results = self.service_status
 
         statuses = [r.get("status", "unknown") for r in results.values()]
@@ -324,7 +347,11 @@ class ShadyPulse(commands.Cog):
     @app_commands.command(name="uptime", description="Show bot uptime")
     @app_commands.guild_only()
     async def show_uptime(self, interaction: discord.Interaction):
-        """Show uptime."""
+        """Show uptime (mod-only)."""
+        if not await self.is_authorized(interaction):
+            await interaction.response.send_message("You don't have permission to view uptime.", ephemeral=True)
+            return
+
         uptime = self._format_uptime(int((datetime.now(timezone.utc) - self.start_time).total_seconds()))
         embed = discord.Embed(title="🕐 Bot Uptime", color=discord.Color.green())
         embed.add_field(name="Uptime", value=f"**{uptime}**", inline=True)

@@ -447,6 +447,7 @@ class ShadyDocs(commands.Cog):
         app_commands.Choice(name="Set Embed Color", value="setcolor"),
         app_commands.Choice(name="Add Mod Role", value="addrole"),
         app_commands.Choice(name="Remove Mod Role", value="removerole"),
+        app_commands.Choice(name="List Mod Roles", value="listroles"),
     ])
     @app_commands.autocomplete(name=page_autocomplete, category=category_autocomplete)
     @app_commands.describe(role="Role for addrole/removerole actions")
@@ -757,6 +758,32 @@ class ShadyDocs(commands.Cog):
             await interaction.response.send_message(
                 f"✅ {role.mention} can no longer manage documentation.", ephemeral=True
             )
+
+        elif action == "listroles":
+            mod_roles = await self.config.guild(interaction.guild).mod_roles()
+
+            if not mod_roles:
+                await interaction.response.send_message(
+                    "No mod roles configured. Admins only.",
+                    ephemeral=True
+                )
+                return
+
+            role_mentions = []
+            for role_id in mod_roles:
+                r = interaction.guild.get_role(role_id)
+                if r:
+                    role_mentions.append(r.mention)
+                else:
+                    role_mentions.append(f"Unknown ({role_id})")
+
+            embed = discord.Embed(
+                title="📚 ShadyDocs Mod Roles",
+                description="\n".join(role_mentions),
+                color=discord.Color.blue(),
+            )
+            embed.set_footer(text="Admins can always manage documentation")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot: Red):

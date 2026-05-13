@@ -175,13 +175,44 @@ class ChannelSelect(discord.ui.Select):
         await interaction.response.send_message(f"Feedback channel set to {display}", ephemeral=True)
 
 
-class RoleSelect(discord.ui.Select):
-    """Select for choosing recipient/sender role."""
+class RecipientRolesSelect(discord.ui.Select):
+    """Select for choosing multiple recipient roles."""
 
-    def __init__(self, cog: "AnonMail", roles: List[discord.Role], setting: str, current_id: Optional[int]):
+    def __init__(self, cog: "AnonMail", roles: List[discord.Role], current_ids: List[int]):
         self.cog = cog
-        self.setting = setting
-        options = [discord.SelectOption(label="None (Anyone)" if setting == "sender" else "None", value="none", emoji="🚫")]
+        options = []
+        for r in roles[:25]:
+            if not r.is_default() and not r.managed:
+                options.append(discord.SelectOption(
+                    label=r.name[:100],
+                    value=str(r.id),
+                    default=r.id in current_ids
+                ))
+        if not options:
+            options.append(discord.SelectOption(label="No roles available", value="none"))
+        super().__init__(
+            placeholder="Select recipient role(s)...",
+            options=options,
+            min_values=0,
+            max_values=min(len(options), 10)
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        role_ids = [int(v) for v in self.values if v != "none"]
+        await self.cog.config.guild(interaction.guild).recipient_roles.set(role_ids)
+        if role_ids:
+            display = ", ".join(f"<@&{rid}>" for rid in role_ids)
+        else:
+            display = "None (cleared)"
+        await interaction.response.send_message(f"Recipient roles set to: {display}", ephemeral=True)
+
+
+class SenderRoleSelect(discord.ui.Select):
+    """Select for choosing sender role."""
+
+    def __init__(self, cog: "AnonMail", roles: List[discord.Role], current_id: Optional[int]):
+        self.cog = cog
+        options = [discord.SelectOption(label="None (Anyone)", value="none", emoji="🚫")]
         for r in roles[:24]:
             if not r.is_default() and not r.managed:
                 options.append(discord.SelectOption(
@@ -189,17 +220,14 @@ class RoleSelect(discord.ui.Select):
                     value=str(r.id),
                     default=r.id == current_id
                 ))
-        super().__init__(placeholder=f"Select {setting} role...", options=options)
+        super().__init__(placeholder="Select sender role...", options=options)
 
     async def callback(self, interaction: discord.Interaction):
         value = self.values[0]
         role_id = None if value == "none" else int(value)
-        if self.setting == "recipient":
-            await self.cog.config.guild(interaction.guild).recipient_role.set(role_id)
-        else:
-            await self.cog.config.guild(interaction.guild).sender_role.set(role_id)
-        display = f"<@&{role_id}>" if role_id else "None"
-        await interaction.response.send_message(f"{self.setting.title()} role set to {display}", ephemeral=True)
+        await self.cog.config.guild(interaction.guild).sender_role.set(role_id)
+        display = f"<@&{role_id}>" if role_id else "None (Anyone)"
+        await interaction.response.send_message(f"Sender role set to {display}", ephemeral=True)
 
 
 class SetupView(discord.ui.View):
@@ -216,8 +244,8 @@ class SetupView(discord.ui.View):
         roles = sorted(guild.roles, key=lambda r: r.position, reverse=True)
 
         self.add_item(ChannelSelect(cog, channels, config["feedback_channel"]))
-        self.add_item(RoleSelect(cog, roles, "recipient", config["recipient_role"]))
-        self.add_item(RoleSelect(cog, roles, "sender", config["sender_role"]))
+        self.add_item(RecipientRolesSelect(cog, roles, config.get("recipient_roles", [])))
+        self.add_item(SenderRoleSelect(cog, roles, config["sender_role"]))
 
     @discord.ui.button(label="More Settings", style=discord.ButtonStyle.primary, emoji="⚙️", row=3)
     async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -249,12 +277,11 @@ class AnonMail(commands.Cog):
 
         default_guild = {
             "enabled": False,
-            "recipient_role": None,
+            "recipient_roles": [],  # Changed from recipient_role (single) to recipient_roles (list)
             "sender_role": None,
             "feedback_channel": None,
             "thread_prefix": "Feedback - ",
             "cooldown_minutes": 60,
-            "banned_users": [],
             "mod_roles": [],
         }
         self.config.register_guild(**default_guild)
@@ -295,10 +322,6 @@ class AnonMail(commands.Cog):
             await interaction.response.send_message("Anonymous feedback is not enabled.", ephemeral=True)
             return
 
-        if interaction.user.id in config["banned_users"]:
-            await interaction.response.send_message("You are banned from using feedback.", ephemeral=True)
-            return
-
         remaining = await self._check_cooldown(interaction.guild.id, interaction.user.id)
         if remaining:
             await interaction.response.send_message(
@@ -313,16 +336,29 @@ class AnonMail(commands.Cog):
                 await interaction.response.send_message(f"You need the `{role.name}` role.", ephemeral=True)
                 return
 
-        if not config["recipient_role"]:
-            await interaction.response.send_message("Recipient role not configured.", ephemeral=True)
+        # Support both old single recipient_role and new recipient_roles list
+        recipient_role_ids = config.get("recipient_roles", [])
+        if not recipient_role_ids:
+            # Backwards compatibility: check old single role config
+            old_role = config.get("recipient_role")
+            if old_role:
+                recipient_role_ids = [old_role]
+
+        if not recipient_role_ids:
+            await interaction.response.send_message("Recipient role(s) not configured.", ephemeral=True)
             return
 
-        role = interaction.guild.get_role(config["recipient_role"])
-        if not role:
-            await interaction.response.send_message("Recipient role not found.", ephemeral=True)
-            return
+        # Collect recipients from all configured roles
+        recipients = []
+        seen_ids = set()
+        for role_id in recipient_role_ids:
+            role = interaction.guild.get_role(role_id)
+            if role:
+                for m in role.members:
+                    if not m.bot and m.id not in seen_ids:
+                        recipients.append(m)
+                        seen_ids.add(m.id)
 
-        recipients = [m for m in role.members if not m.bot]
         if not recipients:
             await interaction.response.send_message("No recipients available.", ephemeral=True)
             return
@@ -350,10 +386,17 @@ class AnonMail(commands.Cog):
         """Interactive setup for AnonMail."""
         config = await self.config.guild(ctx.guild).all()
 
+        # Get recipient roles display
+        recipient_role_ids = config.get("recipient_roles", [])
+        if recipient_role_ids:
+            recipient_display = ", ".join(f"<@&{rid}>" for rid in recipient_role_ids)
+        else:
+            recipient_display = "Not set"
+
         embed = discord.Embed(title="📬 AnonMail Setup", color=discord.Color.blue())
         embed.add_field(name="Status", value="✅ Enabled" if config["enabled"] else "❌ Disabled", inline=True)
         embed.add_field(name="Channel", value=f"<#{config['feedback_channel']}>" if config["feedback_channel"] else "Not set", inline=True)
-        embed.add_field(name="Recipient Role", value=f"<@&{config['recipient_role']}>" if config["recipient_role"] else "Not set", inline=True)
+        embed.add_field(name="Recipient Roles", value=recipient_display, inline=True)
         embed.add_field(name="Sender Role", value=f"<@&{config['sender_role']}>" if config["sender_role"] else "Anyone", inline=True)
         embed.add_field(name="Cooldown", value=f"{config['cooldown_minutes']} min", inline=True)
         embed.add_field(name="Prefix", value=f"`{config['thread_prefix']}`", inline=True)
@@ -365,37 +408,21 @@ class AnonMail(commands.Cog):
         """Show current AnonMail configuration."""
         config = await self.config.guild(ctx.guild).all()
 
+        # Get recipient roles display
+        recipient_role_ids = config.get("recipient_roles", [])
+        if recipient_role_ids:
+            recipient_display = ", ".join(f"<@&{rid}>" for rid in recipient_role_ids)
+        else:
+            recipient_display = "Not set"
+
         embed = discord.Embed(title="📬 AnonMail Status", color=discord.Color.blue())
         embed.add_field(name="Enabled", value="✅ Yes" if config["enabled"] else "❌ No", inline=True)
         embed.add_field(name="Channel", value=f"<#{config['feedback_channel']}>" if config["feedback_channel"] else "Not set", inline=True)
-        embed.add_field(name="Recipient Role", value=f"<@&{config['recipient_role']}>" if config["recipient_role"] else "Not set", inline=True)
+        embed.add_field(name="Recipient Roles", value=recipient_display, inline=True)
         embed.add_field(name="Sender Role", value=f"<@&{config['sender_role']}>" if config["sender_role"] else "Anyone", inline=True)
         embed.add_field(name="Cooldown", value=f"{config['cooldown_minutes']} min", inline=True)
-        embed.add_field(name="Banned Users", value=str(len(config["banned_users"])), inline=True)
 
         await ctx.send(embed=embed)
-
-    @anonmail.command(name="ban")
-    @app_commands.describe(user="User to ban from feedback")
-    async def anonmail_ban(self, ctx: commands.Context, user: discord.User):
-        """Ban a user from using feedback."""
-        async with self.config.guild(ctx.guild).banned_users() as banned:
-            if user.id in banned:
-                await ctx.send(f"{user.mention} is already banned.")
-                return
-            banned.append(user.id)
-        await ctx.send(f"✅ {user.mention} banned from feedback.")
-
-    @anonmail.command(name="unban")
-    @app_commands.describe(user="User to unban")
-    async def anonmail_unban(self, ctx: commands.Context, user: discord.User):
-        """Unban a user from feedback."""
-        async with self.config.guild(ctx.guild).banned_users() as banned:
-            if user.id not in banned:
-                await ctx.send(f"{user.mention} is not banned.")
-                return
-            banned.remove(user.id)
-        await ctx.send(f"✅ {user.mention} unbanned.")
 
     @anonmail.command(name="addrole")
     @app_commands.describe(role="Role that can manage AnonMail")
@@ -428,6 +455,71 @@ class AnonMail(commands.Cog):
                 return
             roles.remove(role.id)
         await ctx.send(f"✅ {role.mention} removed.")
+
+    @anonmail.command(name="listroles")
+    @app_commands.describe()
+    async def anonmail_listroles(self, ctx: commands.Context):
+        """List all roles that can manage AnonMail."""
+        mod_roles = await self.config.guild(ctx.guild).mod_roles()
+
+        if not mod_roles:
+            await ctx.send("No mod roles configured. Admins only.")
+            return
+
+        role_mentions = []
+        for role_id in mod_roles:
+            role = ctx.guild.get_role(role_id)
+            if role:
+                role_mentions.append(role.mention)
+            else:
+                role_mentions.append(f"Unknown ({role_id})")
+
+        embed = discord.Embed(
+            title="📬 AnonMail Mod Roles",
+            description="\n".join(role_mentions),
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(text="Admins can always manage AnonMail")
+        await ctx.send(embed=embed)
+
+    @anonmail.command(name="listrecipients")
+    @app_commands.describe()
+    async def anonmail_listrecipients(self, ctx: commands.Context):
+        """List all recipient roles that can receive feedback."""
+        config = await self.config.guild(ctx.guild).all()
+        recipient_role_ids = config.get("recipient_roles", [])
+
+        if not recipient_role_ids:
+            await ctx.send("No recipient roles configured.")
+            return
+
+        role_info = []
+        total_recipients = 0
+        seen_ids = set()
+
+        for role_id in recipient_role_ids:
+            role = ctx.guild.get_role(role_id)
+            if role:
+                # Count unique non-bot members
+                role_members = [m for m in role.members if not m.bot and m.id not in seen_ids]
+                for m in role_members:
+                    seen_ids.add(m.id)
+                total_recipients += len(role_members)
+                role_info.append(f"{role.mention} ({len(role.members)} members)")
+            else:
+                role_info.append(f"Unknown role ({role_id})")
+
+        embed = discord.Embed(
+            title="📬 AnonMail Recipient Roles",
+            description="\n".join(role_info),
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="Total Recipients",
+            value=f"{total_recipients} unique members can receive feedback",
+            inline=False
+        )
+        await ctx.send(embed=embed)
 
 
 async def setup(bot: Red):

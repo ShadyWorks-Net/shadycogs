@@ -505,6 +505,32 @@ class ShadyStatus(commands.Cog):
             roles.remove(role.id)
         await ctx.send(f"✅ {role.mention} removed.")
 
+    @shadystatus.command(name="listroles")
+    @app_commands.describe()
+    async def shadystatus_listroles(self, ctx: commands.Context):
+        """List all roles that can manage servers."""
+        mod_roles = await self.config.guild(ctx.guild).mod_roles()
+
+        if not mod_roles:
+            await ctx.send("No mod roles configured. Admins only.")
+            return
+
+        role_mentions = []
+        for role_id in mod_roles:
+            role = ctx.guild.get_role(role_id)
+            if role:
+                role_mentions.append(role.mention)
+            else:
+                role_mentions.append(f"Unknown ({role_id})")
+
+        embed = discord.Embed(
+            title="🎮 ShadyStatus Mod Roles",
+            description="\n".join(role_mentions),
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(text="Admins can always manage servers")
+        await ctx.send(embed=embed)
+
 
 async def setup(bot: Red):
     if not A2S_AVAILABLE:

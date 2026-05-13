@@ -504,17 +504,6 @@ class SignupTracker(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    @signuptracker.command(name="close")
-    async def signuptracker_close(self, ctx: commands.Context):
-        """Close the current signup and archive it."""
-        active = await self.config.guild(ctx.guild).active_signup()
-        if not active["announcement_id"]:
-            await ctx.send("❌ No active signup to close.")
-            return
-
-        await self._close_signup(ctx.guild, f"Closed by {ctx.author}")
-        await ctx.send("✅ Signup closed and archived.")
-
     @signuptracker.command(name="history")
     @app_commands.describe(limit="Number of entries to show (default: 10)")
     async def signuptracker_history(self, ctx: commands.Context, limit: int = 10):
@@ -652,3 +641,29 @@ class SignupTracker(commands.Cog):
             roles.remove(role.id)
 
         await ctx.send(f"✅ {role.mention} removed from management.")
+
+    @signuptracker.command(name="listroles")
+    @app_commands.describe()
+    async def signuptracker_listroles(self, ctx: commands.Context):
+        """List all roles that can manage signup tracker."""
+        mod_roles = await self.config.guild(ctx.guild).mod_roles()
+
+        if not mod_roles:
+            await ctx.send("No mod roles configured. Admins and users with `manage_guild` permission only.")
+            return
+
+        role_mentions = []
+        for role_id in mod_roles:
+            role = ctx.guild.get_role(role_id)
+            if role:
+                role_mentions.append(role.mention)
+            else:
+                role_mentions.append(f"Unknown ({role_id})")
+
+        embed = discord.Embed(
+            title="📋 SignupTracker Mod Roles",
+            description="\n".join(role_mentions),
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(text="Admins and manage_guild permission can always manage signups")
+        await ctx.send(embed=embed)

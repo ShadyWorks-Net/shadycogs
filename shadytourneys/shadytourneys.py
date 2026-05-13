@@ -142,6 +142,13 @@ class ShadyTourneys(commands.Cog):
         #     "checked_in": [user_ids],  # Players who checked in for match
         #     "forfeit": bool,
         #     "forfeit_reason": str | None,  # "no_show", "deadline", "manual"
+        #     "history": [  # Lightweight audit log for disputes
+        #         {"event": "proposed", "by": user_id, "at": ISO, "time": proposed_ISO},
+        #         {"event": "accepted", "by": user_id, "at": ISO},
+        #         {"event": "checkin", "by": user_id, "at": ISO},
+        #         {"event": "reported", "by": user_id, "at": ISO, "score": "2-1", "winner": ...},
+        #         {"event": "forfeit", "by": user_id, "at": ISO},
+        #     ],
         # }
 
         self.config.register_global(**default_global)
@@ -644,18 +651,33 @@ class ShadyTourneys(commands.Cog):
             )
 
             # Post initial message with scheduling buttons
+            if tournament["type"] == "team":
+                schedule_instructions = (
+                    "**How to schedule (Team Match):**\n"
+                    "1️⃣ Anyone can **Propose Time** to suggest when to play\n"
+                    "2️⃣ **ALL players** from both teams must **Accept**\n"
+                    "3️⃣ Or anyone can **Counter-Propose** a different time\n"
+                    "4️⃣ Once scheduled, players **Check In** within ±15 min\n"
+                    "5️⃣ Play and **Report Score** when done\n\n"
+                    "⚠️ If opponents don't check in, you can **Claim Forfeit** after 15 min"
+                )
+            else:
+                schedule_instructions = (
+                    "**How to schedule:**\n"
+                    "1️⃣ Use **Propose Time** to suggest when to play\n"
+                    "2️⃣ Opponent uses **Accept** or **Counter-Propose**\n"
+                    "3️⃣ Both players **Check In** within ±15 min of match time\n"
+                    "4️⃣ Play and **Report Score** when done\n\n"
+                    "⚠️ If opponent doesn't check in, you can **Claim Forfeit** after 15 min"
+                )
+
             embed = discord.Embed(
                 title=f"⚔️ {thread_name}",
                 description=(
                     f"**Tournament:** {tournament['name']}\n"
                     f"**Round:** {match.get('round', 1)}\n"
                     f"**Deadline:** <t:{int(datetime.fromisoformat(match['deadline']).timestamp())}:F>\n\n"
-                    "**How to schedule:**\n"
-                    "1️⃣ Use **Propose Time** to suggest when to play\n"
-                    "2️⃣ Opponent uses **Accept** or **Counter-Propose**\n"
-                    "3️⃣ Both players **Check In** within ±15 min of match time\n"
-                    "4️⃣ Play your match and report the result\n\n"
-                    "⚠️ If opponent doesn't check in, you can **Claim Forfeit** after 15 min"
+                    f"{schedule_instructions}"
                 ),
                 color=discord.Color.blue()
             )
@@ -1734,6 +1756,7 @@ class ShadyTourneys(commands.Cog):
         app_commands.Choice(name="Cancel Tournament", value="cancel"),
         app_commands.Choice(name="View Bracket", value="bracket"),
         app_commands.Choice(name="Report Match Result", value="report"),
+        app_commands.Choice(name="Match History (Disputes)", value="history"),
     ])
     @app_commands.autocomplete(tournament_id=tournament_autocomplete)
     async def tourneymanage(
@@ -1769,6 +1792,50 @@ class ShadyTourneys(commands.Cog):
             await self.show_bracket(interaction, tournament_id, tournament)
         elif action == "report":
             await self.report_match(interaction, tournament_id, tournament)
+        elif action == "history":
+            await self.show_match_history(interaction, tournament_id, tournament)
+
+    async def show_match_history(
+        self,
+        interaction: discord.Interaction,
+        tournament_id: str,
+        tournament: Dict[str, Any]
+    ) -> None:
+        """Show match history for dispute resolution."""
+        bracket = tournament.get("bracket", [])
+
+        if not bracket:
+            await interaction.response.send_message("No matches in this tournament yet.", ephemeral=True)
+            return
+
+        # Build select menu for matches
+        options = []
+        for match in bracket:
+            p1 = match["participant1"]
+            p2 = match["participant2"]
+
+            if tournament["type"] == "team":
+                label = f"R{match.get('round', '?')}: {p1} vs {p2}"
+            else:
+                label = f"R{match.get('round', '?')}: Match {match['id']}"
+
+            status = "✅" if match.get("completed") else "⏳"
+            options.append(discord.SelectOption(
+                label=f"{status} {label}"[:100],
+                value=str(match["id"]),
+                description=f"Score: {match.get('score', 'Pending')}"[:100] if match.get("completed") else "Not played yet"
+            ))
+
+        if not options:
+            await interaction.response.send_message("No matches found.", ephemeral=True)
+            return
+
+        view = MatchHistorySelectView(self, tournament_id, tournament, options[:25])
+        await interaction.response.send_message(
+            "Select a match to view its history:",
+            view=view,
+            ephemeral=True
+        )
 
     async def start_tournament(
         self,
@@ -2290,6 +2357,16 @@ class ProposeTimeModal(discord.ui.Modal, title="Propose Match Time"):
         # Update match
         match["proposed_time"] = parsed_time.isoformat()
         match["proposed_by"] = interaction.user.id
+        match["time_accepts"] = []  # Clear any previous accepts when new time is proposed
+
+        # Log to history
+        history = match.setdefault("history", [])
+        history.append({
+            "event": "proposed",
+            "by": interaction.user.id,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "time": parsed_time.isoformat()
+        })
 
         async with self.cog.config.guild(interaction.guild).tournaments() as all_tournaments:
             all_tournaments[self.tournament_id] = tournament
@@ -2430,6 +2507,14 @@ class MatchSchedulingView(discord.ui.View):
         checked_in.append(interaction.user.id)
         match["checked_in"] = checked_in
 
+        # Log to history
+        history = match.setdefault("history", [])
+        history.append({
+            "event": "checkin",
+            "by": interaction.user.id,
+            "at": datetime.now(timezone.utc).isoformat()
+        })
+
         async with self.cog.config.guild(interaction.guild).tournaments() as all_tournaments:
             all_tournaments[tournament_id] = tournament
 
@@ -2480,16 +2565,10 @@ class MatchSchedulingView(discord.ui.View):
             )
             return
 
-        if proposed_by == interaction.user.id:
-            await interaction.response.send_message(
-                "❌ You cannot accept your own proposal. Wait for your opponent.",
-                ephemeral=True
-            )
-            return
-
         # Check if user is a participant
         p1, p2 = match["participant1"], match["participant2"]
         is_participant = False
+        user_team = None
 
         if tournament["type"] == "team":
             teams_data = tournament.get("teams", {})
@@ -2497,6 +2576,7 @@ class MatchSchedulingView(discord.ui.View):
                 team = teams_data.get(team_name, {})
                 if interaction.user.id in team.get("players", []):
                     is_participant = True
+                    user_team = team_name
                     break
         else:
             is_participant = interaction.user.id in [p1, p2]
@@ -2508,10 +2588,68 @@ class MatchSchedulingView(discord.ui.View):
             )
             return
 
-        # Accept the time
+        # For solo matches, proposer can't accept their own proposal
+        if tournament["type"] != "team" and proposed_by == interaction.user.id:
+            await interaction.response.send_message(
+                "❌ You cannot accept your own proposal. Wait for your opponent.",
+                ephemeral=True
+            )
+            return
+
+        # Track who has accepted the proposed time
+        time_accepts = match.setdefault("time_accepts", [])
+
+        if interaction.user.id in time_accepts:
+            await interaction.response.send_message(
+                "✅ You've already accepted this time. Waiting for others...",
+                ephemeral=True
+            )
+            return
+
+        time_accepts.append(interaction.user.id)
+
+        # Log to history
+        history = match.setdefault("history", [])
+        history.append({
+            "event": "accepted",
+            "by": interaction.user.id,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "time": proposed_time
+        })
+
+        # For team matches, check if ALL players from BOTH teams have accepted
+        if tournament["type"] == "team":
+            teams_data = tournament.get("teams", {})
+            team1 = teams_data.get(p1, {})
+            team2 = teams_data.get(p2, {})
+            all_players = team1.get("players", []) + team2.get("players", [])
+
+            accepted_count = len([p for p in all_players if p in time_accepts])
+            total_players = len(all_players)
+
+            if accepted_count < total_players:
+                # Not everyone has accepted yet
+                async with self.cog.config.guild(interaction.guild).tournaments() as all_tournaments:
+                    all_tournaments[tournament_id] = tournament
+
+                # Show who still needs to accept
+                pending = [f"<@{p}>" for p in all_players if p not in time_accepts]
+                parsed = datetime.fromisoformat(proposed_time)
+
+                await interaction.response.send_message(
+                    f"✅ **{interaction.user.display_name}** accepted the proposed time!\n"
+                    f"📅 Time: <t:{int(parsed.timestamp())}:F>\n\n"
+                    f"**Progress:** {accepted_count}/{total_players} players accepted\n"
+                    f"**Waiting on:** {', '.join(pending[:10])}{'...' if len(pending) > 10 else ''}",
+                    ephemeral=False
+                )
+                return
+
+        # All required accepts received - schedule the match
         match["scheduled_time"] = proposed_time
         match["proposed_time"] = None
         match["proposed_by"] = None
+        match["time_accepts"] = []  # Clear for potential reschedule
 
         async with self.cog.config.guild(interaction.guild).tournaments() as all_tournaments:
             all_tournaments[tournament_id] = tournament
@@ -2547,7 +2685,68 @@ class MatchSchedulingView(discord.ui.View):
         modal = ProposeTimeModal(self.cog, self.match_id, tournament_id)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="⚠️ Claim Forfeit", style=discord.ButtonStyle.red, custom_id="match_forfeit")
+    @discord.ui.button(label="📊 Report Score", style=discord.ButtonStyle.green, custom_id="match_report", row=1)
+    async def report_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Report match result (players only)."""
+        tournaments = await self.cog.config.guild(interaction.guild).tournaments()
+
+        # Find tournament and match
+        tournament_id = None
+        tournament = None
+        match = None
+
+        for tid, t in tournaments.items():
+            bracket = t.get("bracket", [])
+            for m in bracket:
+                if m.get("id") == self.match_id:
+                    tournament_id = tid
+                    tournament = t
+                    match = m
+                    break
+            if match:
+                break
+
+        if not match:
+            await interaction.response.send_message("Match not found.", ephemeral=True)
+            return
+
+        if match.get("completed"):
+            await interaction.response.send_message("This match has already been reported.", ephemeral=True)
+            return
+
+        # Check if user is a participant
+        p1, p2 = match["participant1"], match["participant2"]
+        is_participant = False
+
+        if tournament["type"] == "team":
+            teams_data = tournament.get("teams", {})
+            for team_name in [p1, p2]:
+                team = teams_data.get(team_name, {})
+                if interaction.user.id in team.get("players", []):
+                    is_participant = True
+                    break
+        else:
+            is_participant = interaction.user.id in [p1, p2]
+
+        if not is_participant:
+            await interaction.response.send_message(
+                "❌ Only match participants can report the score.",
+                ephemeral=True
+            )
+            return
+
+        # Open score modal
+        modal = MatchScoreModal(
+            self.cog,
+            tournament_id,
+            self.match_id,
+            p1,
+            p2,
+            tournament["type"] == "team"
+        )
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="⚠️ Claim Forfeit", style=discord.ButtonStyle.red, custom_id="match_forfeit", row=1)
     async def forfeit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Claim forfeit if opponent no-showed."""
         tournaments = await self.cog.config.guild(interaction.guild).tournaments()
@@ -2664,6 +2863,16 @@ class MatchSchedulingView(discord.ui.View):
         match["forfeit_reason"] = "no_show"
         match["score"] = "FF"
 
+        # Log to history
+        history = match.setdefault("history", [])
+        history.append({
+            "event": "forfeit",
+            "by": interaction.user.id,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "winner": claimant,
+            "forfeiter": forfeiter
+        })
+
         async with self.cog.config.guild(interaction.guild).tournaments() as all_tournaments:
             all_tournaments[tournament_id] = tournament
 
@@ -2673,6 +2882,17 @@ class MatchSchedulingView(discord.ui.View):
             f"The bracket has been updated.",
             ephemeral=False
         )
+
+        # Delete the match thread after forfeit
+        thread_id = match.get("scheduling_thread")
+        if thread_id:
+            try:
+                thread = interaction.guild.get_thread(thread_id)
+                if thread:
+                    await asyncio.sleep(10)
+                    await thread.delete()
+            except Exception as e:
+                log.error(f"Failed to delete match thread after forfeit: {e}")
 
 
 class SoloSignupView(discord.ui.View):
@@ -3157,6 +3377,18 @@ class MatchWinnerSelectView(discord.ui.View):
                     match["winner"] = winner
                     match["score"] = self.score
                     match["completed"] = True
+
+                    # Log to history
+                    history = match.setdefault("history", [])
+                    history.append({
+                        "event": "reported",
+                        "by": interaction.user.id,
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "score": self.score,
+                        "winner": winner,
+                        "loser": loser
+                    })
+
                     match_found = match
                     break
 
@@ -3225,6 +3457,27 @@ class MatchWinnerSelectView(discord.ui.View):
             ephemeral=True
         )
 
+        # Delete the match thread if it exists
+        thread_id = match_found.get("scheduling_thread")
+        if thread_id:
+            try:
+                thread = interaction.guild.get_thread(thread_id)
+                if thread:
+                    # Send final message before deleting
+                    try:
+                        await thread.send(
+                            f"✅ **Match Complete!**\n"
+                            f"Winner: {winner_str}\n"
+                            f"Score: **{self.score}**\n\n"
+                            f"*This thread will be deleted in 30 seconds...*"
+                        )
+                        await asyncio.sleep(30)
+                    except Exception:
+                        pass
+                    await thread.delete()
+            except Exception as e:
+                log.error(f"Failed to delete match thread: {e}")
+
         # Check for tournament completion
         tournaments = await self.cog.config.guild(interaction.guild).tournaments()
         tournament = tournaments[self.tournament_id]
@@ -3242,6 +3495,130 @@ class MatchWinnerSelectView(discord.ui.View):
                 except Exception as e:
                     log.error(f"Error announcing winner: {e}")
 
+        self.stop()
+
+
+class MatchHistorySelectView(discord.ui.View):
+    """View for selecting a match to view its history."""
+
+    def __init__(self, cog, tournament_id: str, tournament: Dict[str, Any], options: List[discord.SelectOption]):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.tournament_id = tournament_id
+        self.tournament = tournament
+
+        select = discord.ui.Select(
+            placeholder="Select a match...",
+            options=options,
+            custom_id="history_match_select"
+        )
+        select.callback = self.match_selected
+        self.add_item(select)
+
+    async def match_selected(self, interaction: discord.Interaction):
+        match_id = int(interaction.data["values"][0])
+
+        # Get fresh tournament data
+        tournaments = await self.cog.config.guild(interaction.guild).tournaments()
+        tournament = tournaments.get(self.tournament_id)
+
+        if not tournament:
+            await interaction.response.send_message("Tournament not found.", ephemeral=True)
+            return
+
+        # Find the match
+        bracket = tournament.get("bracket", [])
+        match = None
+        for m in bracket:
+            if m["id"] == match_id:
+                match = m
+                break
+
+        if not match:
+            await interaction.response.send_message("Match not found.", ephemeral=True)
+            return
+
+        # Build history embed
+        p1 = match["participant1"]
+        p2 = match["participant2"]
+
+        if tournament["type"] == "team":
+            title = f"Match History: {p1} vs {p2}"
+        else:
+            title = f"Match History: <@{p1}> vs <@{p2}>"
+
+        embed = discord.Embed(
+            title=title,
+            color=discord.Color.blue()
+        )
+
+        # Match info
+        embed.add_field(
+            name="Status",
+            value="✅ Completed" if match.get("completed") else "⏳ Pending",
+            inline=True
+        )
+        if match.get("score"):
+            embed.add_field(name="Score", value=match["score"], inline=True)
+        if match.get("winner"):
+            winner = match["winner"]
+            if tournament["type"] == "team":
+                embed.add_field(name="Winner", value=winner, inline=True)
+            else:
+                embed.add_field(name="Winner", value=f"<@{winner}>", inline=True)
+
+        # History log
+        history = match.get("history", [])
+        if history:
+            history_text = ""
+            for entry in history:
+                event = entry.get("event", "unknown")
+                by = entry.get("by")
+                at = entry.get("at", "?")
+
+                # Format timestamp
+                try:
+                    ts = datetime.fromisoformat(at)
+                    time_str = f"<t:{int(ts.timestamp())}:R>"
+                except:
+                    time_str = at[:19] if len(at) > 19 else at
+
+                if event == "proposed":
+                    prop_time = entry.get("time", "?")
+                    try:
+                        prop_ts = datetime.fromisoformat(prop_time)
+                        prop_str = f"<t:{int(prop_ts.timestamp())}:F>"
+                    except:
+                        prop_str = prop_time
+                    history_text += f"📅 **Proposed** by <@{by}> {time_str}\n   → Time: {prop_str}\n"
+                elif event == "accepted":
+                    history_text += f"✅ **Accepted** by <@{by}> {time_str}\n"
+                elif event == "checkin":
+                    history_text += f"🎮 **Checked in** by <@{by}> {time_str}\n"
+                elif event == "reported":
+                    score = entry.get("score", "?")
+                    winner = entry.get("winner", "?")
+                    history_text += f"📊 **Reported** by <@{by}> {time_str}\n   → Score: {score}, Winner: {winner}\n"
+                elif event == "forfeit":
+                    history_text += f"⚠️ **Forfeit** claimed by <@{by}> {time_str}\n"
+                else:
+                    history_text += f"❓ **{event}** by <@{by}> {time_str}\n"
+
+            embed.add_field(
+                name="Event History",
+                value=history_text[:1024] if history_text else "No events recorded",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="Event History",
+                value="No events recorded yet.",
+                inline=False
+            )
+
+        embed.set_footer(text=f"Match ID: {match_id} | Tournament: {tournament.get('name', 'Unknown')}")
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         self.stop()
 
 

@@ -1,0 +1,51 @@
+{
+  "author": ["ShadyTidus", "Vertyco"],
+  "description": "Full-featured leveling system (fork of LevelUp with modern pydantic support)",
+  "disabled": false,
+  "end_user_data_statement": "This cog stores Discord IDs, counts of user messages, and their time spent in voice channels. No private info is stored about users.",
+  "hidden": false,
+  "install_msg": "Thank you for installing ShadyLevel!\n\nIMPORTANT: If you get a 'Sentinel' import error, run this in your Red venv:\n  pip install 'typing_extensions>=4.12'\n\nTo enable leveling: `[p]lset toggle`",
+  "min_bot_version": "3.5.0",
+  "min_python_version": [3, 9, 0],
+  "permissions": [
+    "read_messages",
+    "send_messages",
+    "manage_roles",
+    "attach_files",
+    "embed_links"
+  ],
+  "required_cogs": {},
+  "requirements": [
+    "aiocache",
+    "aiohttp>=3.9.5",
+    "colorgram.py",
+    "emoji",
+    "fastapi",
+    "msgpack",
+    "plotly",
+    "pydantic",
+    "typing_extensions>=4.12",
+    "python-multipart",
+    "python-decouple",
+    "python-dotenv",
+    "psutil",
+    "rapidfuzz",
+    "requests",
+    "tenacity",
+    "ujson",
+    "uvicorn",
+    "jinja2"
+  ],
+  "short": "Discord leveling system",
+  "tags": [
+    "activity",
+    "level",
+    "leveler",
+    "leveling",
+    "levelup",
+    "rank",
+    "utility",
+    "shady"
+  ],
+  "type": "COG"
+}
