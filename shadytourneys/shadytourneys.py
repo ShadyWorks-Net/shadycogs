@@ -1129,7 +1129,9 @@ class ShadyTourneys(commands.Cog):
         role: Optional[discord.Role] = None
     ):
         """Configure tournament settings."""
-        if not interaction.user.guild_permissions.administrator:
+        # Bot owner always authorized
+        is_owner = await self.bot.is_owner(interaction.user)
+        if not is_owner and not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message(
                 "Only administrators can change tournament settings.",
                 ephemeral=True
