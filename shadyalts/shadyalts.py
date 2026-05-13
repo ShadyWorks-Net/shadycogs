@@ -686,9 +686,10 @@ class ShadyAlts(commands.Cog):
         channel: Optional[str] = None
     ):
         """Configure alt tracking settings."""
-        # For role management, require admin
+        # For role management, require admin (or bot owner)
         if setting in ("addrole", "removerole"):
-            if not interaction.user.guild_permissions.administrator:
+            is_owner = await self.bot.is_owner(interaction.user)
+            if not is_owner and not interaction.user.guild_permissions.administrator:
                 await interaction.response.send_message(
                     "Only administrators can manage mod roles.", ephemeral=True
                 )

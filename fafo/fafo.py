@@ -170,7 +170,8 @@ class Fafo(commands.Cog):
     @app_commands.describe(role="Role that can use FAFO commands")
     async def fafoset_addrole(self, ctx: commands.Context, role: discord.Role):
         """Add a role that can use FAFO commands."""
-        if not ctx.author.guild_permissions.administrator:
+        is_owner = await self.bot.is_owner(ctx.author)
+        if not is_owner and not ctx.author.guild_permissions.administrator:
             await ctx.send("Only administrators can manage mod roles.", ephemeral=True)
             return
 
@@ -186,7 +187,8 @@ class Fafo(commands.Cog):
     @app_commands.describe(role="Role to remove from FAFO access")
     async def fafoset_removerole(self, ctx: commands.Context, role: discord.Role):
         """Remove a role from FAFO access."""
-        if not ctx.author.guild_permissions.administrator:
+        is_owner = await self.bot.is_owner(ctx.author)
+        if not is_owner and not ctx.author.guild_permissions.administrator:
             await ctx.send("Only administrators can manage mod roles.", ephemeral=True)
             return
 

@@ -710,7 +710,8 @@ class ShadyDocs(commands.Cog):
             )
 
         elif action == "addrole":
-            if not interaction.user.guild_permissions.administrator:
+            is_owner = await self.bot.is_owner(interaction.user)
+            if not is_owner and not interaction.user.guild_permissions.administrator:
                 await interaction.response.send_message(
                     "Only administrators can manage mod roles.", ephemeral=True
                 )
@@ -735,7 +736,8 @@ class ShadyDocs(commands.Cog):
             )
 
         elif action == "removerole":
-            if not interaction.user.guild_permissions.administrator:
+            is_owner = await self.bot.is_owner(interaction.user)
+            if not is_owner and not interaction.user.guild_permissions.administrator:
                 await interaction.response.send_message(
                     "Only administrators can manage mod roles.", ephemeral=True
                 )
