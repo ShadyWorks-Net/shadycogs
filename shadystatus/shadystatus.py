@@ -410,6 +410,7 @@ class ShadyStatus(commands.Cog):
             await ctx.send_help(ctx.command)
 
     @shadystatus.command(name="setup")
+    @app_commands.describe()
     async def shadystatus_setup(self, ctx: commands.Context):
         """Interactive setup."""
         config = await self.config.guild(ctx.guild).all()
@@ -422,6 +423,7 @@ class ShadyStatus(commands.Cog):
         await ctx.send(embed=embed, view=SetupView(self, ctx.guild, config))
 
     @shadystatus.command(name="add")
+    @app_commands.describe()
     async def shadystatus_add(self, ctx: commands.Context):
         """Add a game server."""
         await ctx.send("Select game type:", view=AddServerView(self))
