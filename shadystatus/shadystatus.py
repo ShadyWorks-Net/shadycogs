@@ -1,16 +1,7 @@
 """
 ShadyStatus - Multi-game server status query cog.
-Queries game servers via Steam A2S protocol and displays game-specific formatted status.
-
-Supported Games:
-- 7 Days to Die
-- ARK: Survival Evolved
-- Rust
-- Valheim
-- Project Zomboid
-- V Rising
+Queries game servers via Steam A2S protocol.
 """
-
 import discord
 import logging
 import asyncio
@@ -24,21 +15,17 @@ from redbot.core.bot import Red
 from discord import app_commands
 
 log = logging.getLogger("red.shadycogs.shadystatus")
-
-# Config identifier for RedBot's Config system
 CONFIG_IDENTIFIER = 1234567895
 
-# Try to import python-a2s
 try:
     import a2s
     A2S_AVAILABLE = True
 except ImportError:
     A2S_AVAILABLE = False
-    log.warning("python-a2s not installed. Install with: pip install python-a2s")
+    log.warning("python-a2s not installed")
 
 
 class GameType(Enum):
-    """Supported game types."""
     SEVENDTD = "7dtd"
     ARK = "ark"
     RUST = "rust"
@@ -48,7 +35,7 @@ class GameType(Enum):
     GENERIC = "generic"
 
 
-GAME_DISPLAY_NAMES = {
+GAME_NAMES = {
     GameType.SEVENDTD: "7 Days to Die",
     GameType.ARK: "ARK: Survival Evolved",
     GameType.RUST: "Rust",
@@ -59,13 +46,9 @@ GAME_DISPLAY_NAMES = {
 }
 
 GAME_EMOJIS = {
-    GameType.SEVENDTD: "🧟",
-    GameType.ARK: "🦖",
-    GameType.RUST: "🔧",
-    GameType.VALHEIM: "⚔️",
-    GameType.PROJECTZOMBOID: "🧟",
-    GameType.VRISING: "🧛",
-    GameType.GENERIC: "🎮",
+    GameType.SEVENDTD: "🧟", GameType.ARK: "🦖", GameType.RUST: "🔧",
+    GameType.VALHEIM: "⚔️", GameType.PROJECTZOMBOID: "🧟",
+    GameType.VRISING: "🧛", GameType.GENERIC: "🎮",
 }
 
 GAME_COLORS = {
@@ -80,471 +63,283 @@ GAME_COLORS = {
 
 
 class ServerQueryError(Exception):
-    """Exception raised when server query fails."""
     pass
 
 
 async def query_server(ip: str, port: int, timeout: float = 5.0) -> Dict[str, Any]:
-    """
-    Query a game server using A2S protocol.
-
-    Returns server info and rules.
-    """
     if not A2S_AVAILABLE:
-        raise ServerQueryError("python-a2s library not installed")
+        raise ServerQueryError("python-a2s not installed")
 
     address = (ip, port)
+    loop = asyncio.get_event_loop()
 
     try:
-        # Run in executor to avoid blocking
-        loop = asyncio.get_event_loop()
-
-        # Get server info
-        info = await loop.run_in_executor(
-            None,
-            lambda: a2s.info(address, timeout=timeout)
-        )
-
-        # Get rules (may not be available on all servers)
+        info = await loop.run_in_executor(None, lambda: a2s.info(address, timeout=timeout))
         rules = {}
         try:
-            rules_raw = await loop.run_in_executor(
-                None,
-                lambda: a2s.rules(address, timeout=timeout)
-            )
-            rules = dict(rules_raw)
-        except Exception as e:
-            log.debug(f"Could not fetch rules for {ip}:{port}: {e}")
-
-        # Get players (optional)
-        players = []
-        try:
-            players_raw = await loop.run_in_executor(
-                None,
-                lambda: a2s.players(address, timeout=timeout)
-            )
-            players = [{"name": p.name, "score": p.score, "duration": p.duration} for p in players_raw]
-        except Exception as e:
-            log.debug(f"Could not fetch players for {ip}:{port}: {e}")
+            rules = dict(await loop.run_in_executor(None, lambda: a2s.rules(address, timeout=timeout)))
+        except Exception:
+            pass
 
         return {
             "server_name": info.server_name,
             "map_name": info.map_name,
-            "game": info.game,
             "players": info.player_count,
             "max_players": info.max_players,
-            "bots": info.bot_count,
             "password_protected": info.password_protected,
-            "vac_enabled": info.vac_enabled,
             "version": info.version,
             "ping": info.ping,
-            "platform": info.platform,
             "rules": rules,
-            "player_list": players,
-            "online": True,
+            "game": info.game,
         }
-
     except asyncio.TimeoutError:
-        raise ServerQueryError("Server did not respond (timeout)")
-    except ConnectionRefusedError:
-        raise ServerQueryError("Connection refused")
+        raise ServerQueryError("Server timeout")
     except Exception as e:
-        raise ServerQueryError(f"Query failed: {e}")
+        raise ServerQueryError(str(e))
 
 
-def format_7dtd_embed(data: Dict[str, Any], server_config: Dict) -> discord.Embed:
-    """Format embed for 7 Days to Die server."""
+def format_embed(data: Dict, config: Dict, game_type: GameType) -> discord.Embed:
+    """Format server status embed."""
+    emoji = GAME_EMOJIS.get(game_type, "🎮")
+    color = GAME_COLORS.get(game_type, discord.Color.blurple())
     rules = data.get("rules", {})
 
-    # Parse 7DTD-specific data
-    current_time = int(rules.get("CurrentServerTime", 0))
-    day = (current_time // 24000) + 1 if current_time else None
-    hour = (current_time % 24000) // 1000 if current_time else None
-    minute = (current_time % 1000) * 60 // 1000 if current_time else None
-
-    bm_freq = int(rules.get("BloodMoonFrequency", 7))
-
-    # Blood moon calculation
-    days_until = None
-    next_bm_day = None
-    if day:
-        day_in_cycle = day % bm_freq
-        if day_in_cycle == 0:
-            days_until = 0
-            next_bm_day = day
-        else:
-            days_until = bm_freq - day_in_cycle
-            next_bm_day = day + days_until
-
-    # Determine color based on blood moon
-    if days_until == 0:
-        color = discord.Color.red()
-    elif days_until == 1:
-        color = discord.Color.orange()
-    else:
-        color = discord.Color.dark_green()
-
-    embed = discord.Embed(
-        title=f"🧟 {data['server_name']}",
-        color=color,
-    )
-
-    if day:
-        embed.add_field(name="📅 In-Game Day", value=f"**Day {day}**", inline=True)
-    if hour is not None:
-        embed.add_field(name="🕐 In-Game Time", value=f"**{hour:02d}:{minute:02d}**", inline=True)
-
-    embed.add_field(
-        name="👥 Players",
-        value=f"**{data['players']} / {data['max_players']}**",
-        inline=True
-    )
-
-    if days_until is not None:
-        if days_until == 0:
-            bm_value = "🩸 **TONIGHT!** Survive the night!"
-        elif days_until == 1:
-            bm_value = f"⚠️ **Tomorrow** (Day {next_bm_day})"
-        else:
-            bm_value = f"**{days_until} days** (Day {next_bm_day})"
-        embed.add_field(name="🩸 Next Blood Moon", value=bm_value, inline=False)
-
+    embed = discord.Embed(title=f"{emoji} {data['server_name']}", color=color)
+    embed.add_field(name="👥 Players", value=f"**{data['players']} / {data['max_players']}**", inline=True)
     embed.add_field(name="🗺️ Map", value=data.get("map_name", "Unknown"), inline=True)
     embed.add_field(name="📡 Ping", value=f"{int(data.get('ping', 0) * 1000)}ms", inline=True)
 
-    if data.get("password_protected"):
-        embed.add_field(name="🔒 Password", value="Yes", inline=True)
-
-    return embed
-
-
-def format_ark_embed(data: Dict[str, Any], server_config: Dict) -> discord.Embed:
-    """Format embed for ARK: Survival Evolved server."""
-    embed = discord.Embed(
-        title=f"🦖 {data['server_name']}",
-        color=GAME_COLORS[GameType.ARK],
-    )
-
-    embed.add_field(
-        name="👥 Players",
-        value=f"**{data['players']} / {data['max_players']}**",
-        inline=True
-    )
-    embed.add_field(name="🗺️ Map", value=data.get("map_name", "Unknown"), inline=True)
-    embed.add_field(name="📡 Ping", value=f"{int(data.get('ping', 0) * 1000)}ms", inline=True)
-
-    rules = data.get("rules", {})
-
-    # ARK-specific rules
-    if "SESSIONISPVE_i" in rules:
-        pve = int(rules.get("SESSIONISPVE_i", 0))
-        embed.add_field(name="⚔️ Mode", value="PvE" if pve else "PvP", inline=True)
+    # Game-specific fields
+    if game_type == GameType.SEVENDTD:
+        current_time = int(rules.get("CurrentServerTime", 0))
+        if current_time:
+            day = (current_time // 24000) + 1
+            hour = (current_time % 24000) // 1000
+            embed.add_field(name="📅 Day", value=f"**{day}**", inline=True)
+            embed.add_field(name="🕐 Time", value=f"**{hour:02d}:00**", inline=True)
 
     if data.get("version"):
         embed.add_field(name="📋 Version", value=data["version"], inline=True)
-
     if data.get("password_protected"):
-        embed.add_field(name="🔒 Password", value="Yes", inline=True)
+        embed.add_field(name="🔒", value="Password", inline=True)
 
     return embed
 
 
-def format_rust_embed(data: Dict[str, Any], server_config: Dict) -> discord.Embed:
-    """Format embed for Rust server."""
-    rules = data.get("rules", {})
+# ==================== UI COMPONENTS ====================
 
-    embed = discord.Embed(
-        title=f"🔧 {data['server_name']}",
-        color=GAME_COLORS[GameType.RUST],
+
+class AddServerModal(discord.ui.Modal, title="Add Game Server"):
+    """Modal for adding a server."""
+
+    name = discord.ui.TextInput(label="Server Name (ID)", placeholder="my-server", max_length=32)
+    ip = discord.ui.TextInput(label="IP Address", placeholder="192.168.1.1")
+    port = discord.ui.TextInput(label="Query Port", placeholder="27015", max_length=5)
+    display = discord.ui.TextInput(label="Display Name (optional)", required=False, max_length=100)
+
+    def __init__(self, cog: "ShadyStatus", game: str):
+        super().__init__()
+        self.cog = cog
+        self.game = game
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            port_num = int(self.port.value)
+        except ValueError:
+            await interaction.response.send_message("Invalid port number.", ephemeral=True)
+            return
+
+        name = self.name.value.lower().replace(" ", "-")
+
+        async with self.cog.config.guild(interaction.guild).servers() as servers:
+            if name in servers:
+                await interaction.response.send_message(f"Server `{name}` already exists.", ephemeral=True)
+                return
+
+            servers[name] = {
+                "ip": self.ip.value,
+                "port": port_num,
+                "game": self.game,
+                "display_name": self.display.value or name,
+                "enabled": True,
+            }
+
+        game_name = GAME_NAMES.get(GameType(self.game), self.game)
+        await interaction.response.send_message(
+            f"✅ Added **{self.display.value or name}** ({game_name}) at `{self.ip.value}:{port_num}`"
+        )
+
+
+class GameSelect(discord.ui.Select):
+    """Select game type for new server."""
+
+    def __init__(self, cog: "ShadyStatus"):
+        self.cog = cog
+        options = [
+            discord.SelectOption(label=GAME_NAMES[gt], value=gt.value, emoji=GAME_EMOJIS[gt])
+            for gt in GameType
+        ]
+        super().__init__(placeholder="Select game type...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AddServerModal(self.cog, self.values[0]))
+
+
+class AddServerView(discord.ui.View):
+    """View for adding a server."""
+
+    def __init__(self, cog: "ShadyStatus"):
+        super().__init__(timeout=120)
+        self.add_item(GameSelect(cog))
+
+
+class SettingsModal(discord.ui.Modal, title="ShadyStatus Settings"):
+    """Modal for settings."""
+
+    rate_limit = discord.ui.TextInput(
+        label="Rate Limit (seconds, 0 to disable)",
+        placeholder="300",
+        max_length=4,
     )
 
-    embed.add_field(
-        name="👥 Players",
-        value=f"**{data['players']} / {data['max_players']}**",
-        inline=True
-    )
+    def __init__(self, cog: "ShadyStatus", current_rate: int):
+        super().__init__()
+        self.cog = cog
+        self.rate_limit.default = str(current_rate)
 
-    # Rust-specific rules
-    if "fps_avg" in rules:
-        embed.add_field(name="📊 Server FPS", value=rules["fps_avg"], inline=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            rate = max(0, int(self.rate_limit.value))
+        except ValueError:
+            rate = 300
 
-    if "world.size" in rules:
-        size = int(rules.get("world.size", 0))
-        embed.add_field(name="🗺️ World Size", value=f"{size}m", inline=True)
-
-    if "world.seed" in rules:
-        embed.add_field(name="🌱 Seed", value=rules["world.seed"], inline=True)
-
-    embed.add_field(name="🗺️ Map", value=data.get("map_name", "Procedural Map"), inline=True)
-    embed.add_field(name="📡 Ping", value=f"{int(data.get('ping', 0) * 1000)}ms", inline=True)
-
-    if "queue" in rules:
-        embed.add_field(name="📋 Queue", value=rules["queue"], inline=True)
-
-    if data.get("password_protected"):
-        embed.add_field(name="🔒 Password", value="Yes", inline=True)
-
-    return embed
+        await self.cog.config.guild(interaction.guild).rate_limit_seconds.set(rate)
+        await interaction.response.send_message(f"Rate limit set to **{rate}** seconds.", ephemeral=True)
 
 
-def format_valheim_embed(data: Dict[str, Any], server_config: Dict) -> discord.Embed:
-    """Format embed for Valheim server."""
-    embed = discord.Embed(
-        title=f"⚔️ {data['server_name']}",
-        color=GAME_COLORS[GameType.VALHEIM],
-    )
+class ChannelSelect(discord.ui.Select):
+    """Select for post channel."""
 
-    embed.add_field(
-        name="👥 Players",
-        value=f"**{data['players']} / {data['max_players']}**",
-        inline=True
-    )
-    embed.add_field(name="🗺️ World", value=data.get("map_name", "Unknown"), inline=True)
-    embed.add_field(name="📡 Ping", value=f"{int(data.get('ping', 0) * 1000)}ms", inline=True)
+    def __init__(self, cog: "ShadyStatus", channels: List[discord.TextChannel], current_id: Optional[int]):
+        self.cog = cog
+        options = [discord.SelectOption(label="Same Channel (default)", value="none", emoji="💬")]
+        for ch in channels[:24]:
+            options.append(discord.SelectOption(
+                label=f"#{ch.name}"[:100],
+                value=str(ch.id),
+                default=ch.id == current_id
+            ))
+        super().__init__(placeholder="Post results to...", options=options)
 
-    if data.get("version"):
-        embed.add_field(name="📋 Version", value=data["version"], inline=True)
-
-    if data.get("password_protected"):
-        embed.add_field(name="🔒 Password", value="Yes", inline=True)
-
-    return embed
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        channel_id = None if value == "none" else int(value)
+        await self.cog.config.guild(interaction.guild).post_channel.set(channel_id)
+        display = f"<#{channel_id}>" if channel_id else "Same channel"
+        await interaction.response.send_message(f"Results will post to {display}", ephemeral=True)
 
 
-def format_pz_embed(data: Dict[str, Any], server_config: Dict) -> discord.Embed:
-    """Format embed for Project Zomboid server."""
-    rules = data.get("rules", {})
+class SetupView(discord.ui.View):
+    """Interactive setup view."""
 
-    embed = discord.Embed(
-        title=f"🧟 {data['server_name']}",
-        color=GAME_COLORS[GameType.PROJECTZOMBOID],
-    )
+    def __init__(self, cog: "ShadyStatus", guild: discord.Guild, config: dict):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.config = config
 
-    embed.add_field(
-        name="👥 Players",
-        value=f"**{data['players']} / {data['max_players']}**",
-        inline=True
-    )
-    embed.add_field(name="🗺️ Map", value=data.get("map_name", "Muldraugh, KY"), inline=True)
-    embed.add_field(name="📡 Ping", value=f"{int(data.get('ping', 0) * 1000)}ms", inline=True)
+        channels = [ch for ch in guild.text_channels
+                    if ch.permissions_for(guild.me).send_messages]
+        channels.sort(key=lambda c: (c.category.position if c.category else -1, c.position))
 
-    # PZ-specific
-    if "Open" in rules:
-        pvp = rules.get("Open", "false").lower() == "true"
-        embed.add_field(name="⚔️ PvP", value="Enabled" if pvp else "Disabled", inline=True)
+        self.add_item(ChannelSelect(cog, channels, config["post_channel"]))
 
-    if data.get("version"):
-        embed.add_field(name="📋 Version", value=data["version"], inline=True)
-
-    if data.get("password_protected"):
-        embed.add_field(name="🔒 Password", value="Yes", inline=True)
-
-    return embed
+    @discord.ui.button(label="Rate Limit", style=discord.ButtonStyle.primary, emoji="⏱️", row=1)
+    async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        config = await self.cog.config.guild(interaction.guild).all()
+        await interaction.response.send_modal(SettingsModal(self.cog, config["rate_limit_seconds"]))
 
 
-def format_vrising_embed(data: Dict[str, Any], server_config: Dict) -> discord.Embed:
-    """Format embed for V Rising server."""
-    embed = discord.Embed(
-        title=f"🧛 {data['server_name']}",
-        color=GAME_COLORS[GameType.VRISING],
-    )
-
-    embed.add_field(
-        name="👥 Players",
-        value=f"**{data['players']} / {data['max_players']}**",
-        inline=True
-    )
-    embed.add_field(name="🗺️ Map", value=data.get("map_name", "Vardoran"), inline=True)
-    embed.add_field(name="📡 Ping", value=f"{int(data.get('ping', 0) * 1000)}ms", inline=True)
-
-    if data.get("version"):
-        embed.add_field(name="📋 Version", value=data["version"], inline=True)
-
-    if data.get("password_protected"):
-        embed.add_field(name="🔒 Password", value="Yes", inline=True)
-
-    return embed
-
-
-def format_generic_embed(data: Dict[str, Any], server_config: Dict) -> discord.Embed:
-    """Format a generic embed for any A2S-compatible server."""
-    embed = discord.Embed(
-        title=f"🎮 {data['server_name']}",
-        color=GAME_COLORS[GameType.GENERIC],
-    )
-
-    embed.add_field(
-        name="👥 Players",
-        value=f"**{data['players']} / {data['max_players']}**",
-        inline=True
-    )
-    embed.add_field(name="🗺️ Map", value=data.get("map_name", "Unknown"), inline=True)
-    embed.add_field(name="📡 Ping", value=f"{int(data.get('ping', 0) * 1000)}ms", inline=True)
-
-    if data.get("game"):
-        embed.add_field(name="🎮 Game", value=data["game"], inline=True)
-
-    if data.get("version"):
-        embed.add_field(name="📋 Version", value=data["version"], inline=True)
-
-    if data.get("password_protected"):
-        embed.add_field(name="🔒 Password", value="Yes", inline=True)
-
-    if data.get("vac_enabled"):
-        embed.add_field(name="🛡️ VAC", value="Enabled", inline=True)
-
-    return embed
-
-
-# Map game types to formatters
-EMBED_FORMATTERS = {
-    GameType.SEVENDTD: format_7dtd_embed,
-    GameType.ARK: format_ark_embed,
-    GameType.RUST: format_rust_embed,
-    GameType.VALHEIM: format_valheim_embed,
-    GameType.PROJECTZOMBOID: format_pz_embed,
-    GameType.VRISING: format_vrising_embed,
-    GameType.GENERIC: format_generic_embed,
-}
+# ==================== MAIN COG ====================
 
 
 class ShadyStatus(commands.Cog):
-    """Multi-game server status query cog."""
-
-    __version__ = "1.0.0"
-    __author__ = "ShadyTidus"
+    """Multi-game server status queries."""
 
     def __init__(self, bot: Red) -> None:
         self.bot = bot
         self.config = Config.get_conf(self, identifier=CONFIG_IDENTIFIER, force_registration=True)
 
         default_guild = {
-            "servers": {},  # name -> server config
-            "rate_limit_seconds": 300,  # 5 minute default rate limit
-            "post_channel": None,  # Channel to post results (optional)
-            "mod_roles": [],  # Roles that can manage server configs
+            "servers": {},
+            "rate_limit_seconds": 300,
+            "post_channel": None,
+            "mod_roles": [],
         }
-
-        # Server config structure:
-        # {
-        #     "name": "server name",
-        #     "ip": "1.2.3.4",
-        #     "port": 27015,
-        #     "game": "7dtd",  # GameType value
-        #     "display_name": "My 7DTD Server",  # Optional custom display name
-        #     "enabled": True,
-        # }
-
         self.config.register_guild(**default_guild)
-
-        # Rate limit tracking: guild_id -> {user_id -> {server_name -> timestamp}}
         self._rate_limits: Dict[int, Dict[int, Dict[str, float]]] = {}
 
     async def is_authorized(self, ctx: commands.Context) -> bool:
-        """Check if user has permission to manage servers."""
-        # Bot owner always authorized
         if await self.bot.is_owner(ctx.author):
             return True
-
         if not isinstance(ctx.author, discord.Member):
             return False
-
-        # Admin/guild owner always authorized
         if ctx.author.guild_permissions.administrator or ctx.author == ctx.guild.owner:
             return True
-
-        # Check manage_guild permission
         if ctx.author.guild_permissions.manage_guild:
             return True
-
-        # Check for configured mod roles
         mod_roles = await self.config.guild(ctx.guild).mod_roles()
         return any(role.id in mod_roles for role in ctx.author.roles)
 
-    async def _check_rate_limit(self, guild_id: int, user_id: int, server_name: str) -> Optional[float]:
-        """Check if user is rate limited. Returns seconds remaining or None."""
-        rate_limit = await self.config.guild_from_id(guild_id).rate_limit_seconds()
-
-        guild_limits = self._rate_limits.setdefault(guild_id, {})
-        user_limits = guild_limits.setdefault(user_id, {})
-        last_used = user_limits.get(server_name)
-
-        if last_used is None:
+    def _check_rate_limit(self, guild_id: int, user_id: int, server: str, rate: int) -> Optional[float]:
+        if rate <= 0:
             return None
-
-        remaining = rate_limit - (time.time() - last_used)
+        last = self._rate_limits.get(guild_id, {}).get(user_id, {}).get(server)
+        if last is None:
+            return None
+        remaining = rate - (time.time() - last)
         return remaining if remaining > 0 else None
 
-    def _record_use(self, guild_id: int, user_id: int, server_name: str) -> None:
-        """Record that a user queried a server."""
-        self._rate_limits.setdefault(guild_id, {}).setdefault(user_id, {})[server_name] = time.time()
+    def _record_use(self, guild_id: int, user_id: int, server: str):
+        self._rate_limits.setdefault(guild_id, {}).setdefault(user_id, {})[server] = time.time()
 
-    async def _get_server_choices(self, guild_id: int) -> List[app_commands.Choice[str]]:
-        """Get autocomplete choices for servers."""
-        servers = await self.config.guild_from_id(guild_id).servers()
-        choices: List[app_commands.Choice[str]] = []
-        for name, config in servers.items():
-            if config.get("enabled", True):
-                display = config.get("display_name", name)
-                choices.append(app_commands.Choice(name=display, value=name))
-        return choices[:25]  # Discord limit
-
-    async def server_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> List[app_commands.Choice[str]]:
-        """Autocomplete for server names."""
+    async def server_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
         servers = await self.config.guild(interaction.guild).servers()
         choices = []
-        for name, config in servers.items():
-            if not config.get("enabled", True):
+        for name, cfg in servers.items():
+            if not cfg.get("enabled", True):
                 continue
-            display = config.get("display_name", name)
+            display = cfg.get("display_name", name)
             if current.lower() in name.lower() or current.lower() in display.lower():
                 choices.append(app_commands.Choice(name=display, value=name))
         return choices[:25]
 
-    @app_commands.command(name="server", description="Check the status of a game server")
-    @app_commands.describe(name="The server to query")
+    # ==================== USER COMMANDS ====================
+
+    @app_commands.command(name="server", description="Check game server status")
+    @app_commands.describe(name="Server to query")
     @app_commands.autocomplete(name=server_autocomplete)
     @app_commands.guild_only()
-    async def server_status(self, interaction: discord.Interaction, name: str) -> None:
-        """Query a game server and display its status."""
+    async def server_status(self, interaction: discord.Interaction, name: str):
+        """Query a game server."""
         if not A2S_AVAILABLE:
-            await interaction.response.send_message(
-                "❌ Server query is not available. The `python-a2s` library is not installed.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("Server queries unavailable (missing python-a2s).", ephemeral=True)
             return
 
         servers = await self.config.guild(interaction.guild).servers()
-
         if name not in servers:
-            await interaction.response.send_message(
-                f"❌ Server `{name}` not found. Use `/server` with autocomplete to see available servers.",
-                ephemeral=True
-            )
+            await interaction.response.send_message(f"Server `{name}` not found.", ephemeral=True)
             return
 
-        server_config = servers[name]
-
-        if not server_config.get("enabled", True):
-            await interaction.response.send_message(
-                f"❌ Server `{name}` is currently disabled.",
-                ephemeral=True
-            )
+        cfg = servers[name]
+        if not cfg.get("enabled", True):
+            await interaction.response.send_message(f"Server `{name}` is disabled.", ephemeral=True)
             return
 
-        # Rate limit check
-        remaining = await self._check_rate_limit(
-            interaction.guild.id, interaction.user.id, name
-        )
-        if remaining is not None:
-            mins = int(remaining // 60)
-            secs = int(remaining % 60)
+        rate_limit = await self.config.guild(interaction.guild).rate_limit_seconds()
+        remaining = self._check_rate_limit(interaction.guild.id, interaction.user.id, name, rate_limit)
+        if remaining:
             await interaction.response.send_message(
-                f"⏳ You can query `{name}` again in **{mins}m {secs}s**.",
+                f"Wait **{int(remaining // 60)}m {int(remaining % 60)}s** to query again.",
                 ephemeral=True
             )
             return
@@ -552,74 +347,53 @@ class ShadyStatus(commands.Cog):
         await interaction.response.defer()
 
         try:
-            data = await query_server(server_config["ip"], server_config["port"])
+            data = await query_server(cfg["ip"], cfg["port"])
         except ServerQueryError as e:
-            await interaction.followup.send(
-                embed=discord.Embed(
-                    title="❌ Server Query Failed",
-                    description=f"Could not reach **{server_config.get('display_name', name)}**.\n`{e}`",
-                    color=discord.Color.red(),
-                )
-            )
+            await interaction.followup.send(embed=discord.Embed(
+                title="❌ Query Failed",
+                description=f"**{cfg.get('display_name', name)}**\n`{e}`",
+                color=discord.Color.red()
+            ))
             return
 
         self._record_use(interaction.guild.id, interaction.user.id, name)
 
-        # Get the appropriate formatter
-        game_type = GameType(server_config.get("game", "generic"))
-        formatter = EMBED_FORMATTERS.get(game_type, format_generic_embed)
-        embed = formatter(data, server_config)
-
-        # Add footer with query info
-        embed.set_footer(
-            text=f"Queried by {interaction.user.display_name} • {server_config['ip']}:{server_config['port']}"
-        )
+        game_type = GameType(cfg.get("game", "generic"))
+        embed = format_embed(data, cfg, game_type)
+        embed.set_footer(text=f"{interaction.user.display_name} • {cfg['ip']}:{cfg['port']}")
         embed.timestamp = datetime.now(timezone.utc)
 
-        # Check if we should post to a specific channel
-        post_channel_id = await self.config.guild(interaction.guild).post_channel()
-        if post_channel_id and post_channel_id != interaction.channel_id:
-            channel = interaction.guild.get_channel(post_channel_id)
+        post_channel = await self.config.guild(interaction.guild).post_channel()
+        if post_channel and post_channel != interaction.channel_id:
+            channel = interaction.guild.get_channel(post_channel)
             if channel:
-                try:
-                    await channel.send(embed=embed)
-                    await interaction.followup.send(
-                        f"✅ Server status posted in <#{post_channel_id}>!",
-                        ephemeral=True
-                    )
-                    return
-                except discord.Forbidden:
-                    log.warning(f"No permission to post in channel {post_channel_id}")
+                await channel.send(embed=embed)
+                await interaction.followup.send(f"Posted in <#{post_channel}>!", ephemeral=True)
+                return
 
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="servers", description="List all configured game servers")
+    @app_commands.command(name="servers", description="List configured servers")
     @app_commands.guild_only()
-    async def list_servers(self, interaction: discord.Interaction) -> None:
-        """List all configured servers."""
+    async def list_servers(self, interaction: discord.Interaction):
+        """List all servers."""
         servers = await self.config.guild(interaction.guild).servers()
 
         if not servers:
-            await interaction.response.send_message(
-                "📋 No servers configured. Admins can add servers with `/shadystatus add`.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("No servers configured.", ephemeral=True)
             return
 
-        embed = discord.Embed(
-            title="🎮 Configured Servers",
-            color=discord.Color.blue(),
-        )
+        embed = discord.Embed(title="🎮 Game Servers", color=discord.Color.blue())
 
-        for name, config in servers.items():
-            game_type = GameType(config.get("game", "generic"))
+        for name, cfg in servers.items():
+            game_type = GameType(cfg.get("game", "generic"))
             emoji = GAME_EMOJIS.get(game_type, "🎮")
-            game_name = GAME_DISPLAY_NAMES.get(game_type, "Unknown")
-            status = "✅" if config.get("enabled", True) else "❌"
-
-            display = config.get("display_name", name)
-            value = f"{emoji} {game_name}\n`{config['ip']}:{config['port']}`\nStatus: {status}"
-            embed.add_field(name=display, value=value, inline=True)
+            status = "✅" if cfg.get("enabled", True) else "❌"
+            embed.add_field(
+                name=cfg.get("display_name", name),
+                value=f"{emoji} {GAME_NAMES.get(game_type, 'Unknown')}\n{status} `{cfg['ip']}:{cfg['port']}`",
+                inline=True
+            )
 
         await interaction.response.send_message(embed=embed)
 
@@ -628,214 +402,111 @@ class ShadyStatus(commands.Cog):
     @commands.hybrid_group(name="shadystatus", aliases=["ss"])
     @commands.guild_only()
     async def shadystatus(self, ctx: commands.Context):
-        """Manage game server status queries."""
+        """Manage server status settings."""
         if not await self.is_authorized(ctx):
-            await ctx.send("You don't have permission to manage server status settings.", ephemeral=True)
+            await ctx.send("You don't have permission.", ephemeral=True)
             return
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
 
+    @shadystatus.command(name="setup")
+    async def shadystatus_setup(self, ctx: commands.Context):
+        """Interactive setup."""
+        config = await self.config.guild(ctx.guild).all()
+
+        embed = discord.Embed(title="🎮 ShadyStatus Setup", color=discord.Color.blue())
+        embed.add_field(name="Servers", value=str(len(config["servers"])), inline=True)
+        embed.add_field(name="Rate Limit", value=f"{config['rate_limit_seconds']}s", inline=True)
+        embed.add_field(name="Post Channel", value=f"<#{config['post_channel']}>" if config["post_channel"] else "Same channel", inline=True)
+
+        await ctx.send(embed=embed, view=SetupView(self, ctx.guild, config))
+
     @shadystatus.command(name="add")
-    @app_commands.describe(
-        name="Unique identifier for the server",
-        ip="Server IP address",
-        port="Query port (usually game port or game port + 1)",
-        game="Game type (7dtd, ark, rust, valheim, pz, vrising, generic)",
-        display_name="Optional display name"
-    )
-    async def add_server(
-        self,
-        ctx: commands.Context,
-        name: str,
-        ip: str,
-        port: int,
-        game: str,
-        *,
-        display_name: Optional[str] = None
-    ):
-        """Add a game server to monitor."""
-        # Validate game type
-        valid_games = [gt.value for gt in GameType]
-        if game.lower() not in valid_games:
-            await ctx.send(f"❌ Invalid game type. Valid options: {', '.join(valid_games)}")
-            return
-
-        async with self.config.guild(ctx.guild).servers() as servers:
-            if name in servers:
-                await ctx.send(f"❌ Server `{name}` already exists. Use `remove` first or choose a different name.")
-                return
-
-            servers[name] = {
-                "name": name,
-                "ip": ip,
-                "port": port,
-                "game": game.lower(),
-                "display_name": display_name or name,
-                "enabled": True,
-            }
-
-        await ctx.send(f"✅ Added server `{name}` ({GAME_DISPLAY_NAMES.get(GameType(game.lower()), game)}) at `{ip}:{port}`.")
+    async def shadystatus_add(self, ctx: commands.Context):
+        """Add a game server."""
+        await ctx.send("Select game type:", view=AddServerView(self))
 
     @shadystatus.command(name="remove")
-    @app_commands.describe(name="Server identifier to remove")
-    async def remove_server(self, ctx: commands.Context, name: str):
-        """Remove a game server."""
+    @app_commands.describe(name="Server ID to remove")
+    async def shadystatus_remove(self, ctx: commands.Context, name: str):
+        """Remove a server."""
         async with self.config.guild(ctx.guild).servers() as servers:
             if name not in servers:
-                await ctx.send(f"❌ Server `{name}` not found.")
+                await ctx.send(f"Server `{name}` not found.")
                 return
-
             del servers[name]
+        await ctx.send(f"✅ Removed `{name}`.")
 
-        await ctx.send(f"✅ Removed server `{name}`.")
-
-    @shadystatus.command(name="enable")
-    @app_commands.describe(name="Server identifier", enabled="Enable or disable")
-    async def enable_server(self, ctx: commands.Context, name: str, enabled: bool = True):
+    @shadystatus.command(name="toggle")
+    @app_commands.describe(name="Server ID", enabled="Enable or disable")
+    async def shadystatus_toggle(self, ctx: commands.Context, name: str, enabled: bool = True):
         """Enable or disable a server."""
         async with self.config.guild(ctx.guild).servers() as servers:
             if name not in servers:
-                await ctx.send(f"❌ Server `{name}` not found.")
+                await ctx.send(f"Server `{name}` not found.")
                 return
-
             servers[name]["enabled"] = enabled
-
-        status = "enabled" if enabled else "disabled"
-        await ctx.send(f"✅ Server `{name}` is now {status}.")
-
-    @shadystatus.command(name="ratelimit")
-    @app_commands.describe(seconds="Seconds between queries (0 to disable)")
-    async def set_rate_limit(self, ctx: commands.Context, seconds: int):
-        """Set the rate limit between server queries (in seconds)."""
-        if seconds < 0:
-            await ctx.send("❌ Rate limit must be positive.")
-            return
-
-        await self.config.guild(ctx.guild).rate_limit_seconds.set(seconds)
-        if seconds == 0:
-            await ctx.send("✅ Rate limiting disabled.")
-        else:
-            await ctx.send(f"✅ Rate limit set to {seconds} seconds ({seconds // 60} minutes).")
-
-    @shadystatus.command(name="postchannel")
-    @app_commands.describe(channel="Channel for status posts (leave empty to use command channel)")
-    async def set_post_channel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
-        """Set the channel where server status is posted (leave empty to use command channel)."""
-        if channel:
-            await self.config.guild(ctx.guild).post_channel.set(channel.id)
-            await ctx.send(f"✅ Server status will be posted to {channel.mention}.")
-        else:
-            await self.config.guild(ctx.guild).post_channel.set(None)
-            await ctx.send("✅ Server status will be posted in the channel where the command is used.")
-
-    @shadystatus.command(name="list")
-    async def admin_list_servers(self, ctx: commands.Context):
-        """List all configured servers with details."""
-        servers = await self.config.guild(ctx.guild).servers()
-        rate_limit = await self.config.guild(ctx.guild).rate_limit_seconds()
-        post_channel = await self.config.guild(ctx.guild).post_channel()
-
-        embed = discord.Embed(
-            title="🎮 ShadyStatus Configuration",
-            color=discord.Color.blue(),
-        )
-
-        embed.add_field(
-            name="⏱️ Rate Limit",
-            value=f"{rate_limit} seconds" if rate_limit else "Disabled",
-            inline=True
-        )
-        embed.add_field(
-            name="📢 Post Channel",
-            value=f"<#{post_channel}>" if post_channel else "Same channel",
-            inline=True
-        )
-
-        if servers:
-            for name, config in servers.items():
-                game_type = GameType(config.get("game", "generic"))
-                emoji = GAME_EMOJIS.get(game_type, "🎮")
-                status = "✅ Enabled" if config.get("enabled", True) else "❌ Disabled"
-
-                value = f"{emoji} {GAME_DISPLAY_NAMES.get(game_type, 'Unknown')}\n"
-                value += f"Address: `{config['ip']}:{config['port']}`\n"
-                value += f"Status: {status}"
-
-                embed.add_field(
-                    name=f"{config.get('display_name', name)} (`{name}`)",
-                    value=value,
-                    inline=False
-                )
-        else:
-            embed.add_field(name="Servers", value="No servers configured.", inline=False)
-
-        await ctx.send(embed=embed)
+        await ctx.send(f"✅ Server `{name}` {'enabled' if enabled else 'disabled'}.")
 
     @shadystatus.command(name="test")
-    @app_commands.describe(name="Server identifier to test")
-    async def test_server(self, ctx: commands.Context, name: str):
-        """Test querying a server (bypasses rate limit)."""
+    @app_commands.describe(name="Server ID to test")
+    async def shadystatus_test(self, ctx: commands.Context, name: str):
+        """Test query a server (bypasses rate limit)."""
         if not A2S_AVAILABLE:
-            await ctx.send("❌ `python-a2s` library not installed.")
+            await ctx.send("python-a2s not installed.")
             return
 
         servers = await self.config.guild(ctx.guild).servers()
-
         if name not in servers:
-            await ctx.send(f"❌ Server `{name}` not found.")
+            await ctx.send(f"Server `{name}` not found.")
             return
 
-        server_config = servers[name]
+        cfg = servers[name]
 
         async with ctx.typing():
             try:
-                data = await query_server(server_config["ip"], server_config["port"])
-                game_type = GameType(server_config.get("game", "generic"))
-                formatter = EMBED_FORMATTERS.get(game_type, format_generic_embed)
-                embed = formatter(data, server_config)
-                embed.set_footer(text=f"Test query • {server_config['ip']}:{server_config['port']}")
+                data = await query_server(cfg["ip"], cfg["port"])
+                game_type = GameType(cfg.get("game", "generic"))
+                embed = format_embed(data, cfg, game_type)
+                embed.set_footer(text=f"Test • {cfg['ip']}:{cfg['port']}")
                 await ctx.send("✅ Query successful!", embed=embed)
             except ServerQueryError as e:
                 await ctx.send(f"❌ Query failed: {e}")
 
     @shadystatus.command(name="addrole")
-    @app_commands.describe(role="Role that can manage server status")
-    async def add_mod_role(self, ctx: commands.Context, role: discord.Role):
-        """Add a role that can manage server status settings."""
+    @app_commands.describe(role="Role that can manage servers")
+    async def shadystatus_addrole(self, ctx: commands.Context, role: discord.Role):
+        """Add a management role."""
         if not ctx.author.guild_permissions.administrator:
-            await ctx.send("Only administrators can manage mod roles.", ephemeral=True)
-            return
+            if not await self.bot.is_owner(ctx.author):
+                await ctx.send("Only administrators can manage roles.", ephemeral=True)
+                return
 
         async with self.config.guild(ctx.guild).mod_roles() as roles:
             if role.id in roles:
-                await ctx.send(f"{role.mention} is already a mod role.", ephemeral=True)
+                await ctx.send(f"{role.mention} is already a mod role.")
                 return
             roles.append(role.id)
-
-        await ctx.send(f"✅ {role.mention} can now manage server status settings.")
+        await ctx.send(f"✅ {role.mention} can now manage servers.")
 
     @shadystatus.command(name="removerole")
-    @app_commands.describe(role="Role to remove from server status management")
-    async def remove_mod_role(self, ctx: commands.Context, role: discord.Role):
-        """Remove a role from server status management."""
+    @app_commands.describe(role="Role to remove")
+    async def shadystatus_removerole(self, ctx: commands.Context, role: discord.Role):
+        """Remove a management role."""
         if not ctx.author.guild_permissions.administrator:
-            await ctx.send("Only administrators can manage mod roles.", ephemeral=True)
-            return
+            if not await self.bot.is_owner(ctx.author):
+                await ctx.send("Only administrators can manage roles.", ephemeral=True)
+                return
 
         async with self.config.guild(ctx.guild).mod_roles() as roles:
             if role.id not in roles:
-                await ctx.send(f"{role.mention} is not a mod role.", ephemeral=True)
+                await ctx.send(f"{role.mention} is not a mod role.")
                 return
             roles.remove(role.id)
-
-        await ctx.send(f"✅ {role.mention} can no longer manage server status settings.")
+        await ctx.send(f"✅ {role.mention} removed.")
 
 
 async def setup(bot: Red):
-    """Add the cog to the bot."""
     if not A2S_AVAILABLE:
-        log.warning(
-            "ShadyStatus: python-a2s not installed. "
-            "Install it with: pip install python-a2s"
-        )
+        log.warning("ShadyStatus: python-a2s not installed")
     await bot.add_cog(ShadyStatus(bot))

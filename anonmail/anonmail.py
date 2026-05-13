@@ -1,112 +1,53 @@
 """
 AnonMail Cog - Anonymous feedback system.
 Users can submit anonymous feedback to members with a specific role.
-Feedback is posted in dedicated threads.
-
-Features:
-- Role-based recipient selection
-- Anonymous modal submission
-- Per-recipient thread management
-- Cooldown per user (abuse prevention)
-- Ban list for repeat abusers
-- Auto-deletes command for privacy
 """
 import discord
 import logging
 import time
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Optional, List
 
 from redbot.core import commands, Config
 from redbot.core.bot import Red
 from discord import app_commands
 
 log = logging.getLogger("red.shadycogs.anonmail")
-
-# Config identifier for RedBot's Config system
 CONFIG_IDENTIFIER = 1234567891
 
 
-class FeedbackSelectView(discord.ui.View):
-    """View for selecting a feedback recipient."""
-
-    def __init__(self, cog, recipients: list[discord.Member]):
-        super().__init__(timeout=180)
-        self.cog = cog
-        self.recipients = recipients
-
-        # Create select options
-        options = [
-            discord.SelectOption(label=member.display_name, value=str(member.id))
-            for member in recipients[:25]  # Discord limit
-        ]
-
-        select = discord.ui.Select(
-            placeholder="Select a recipient",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-        select.callback = self.select_callback
-        self.add_item(select)
-
-    async def select_callback(self, interaction: discord.Interaction):
-        """Handle recipient selection."""
-        selected_id = int(interaction.data['values'][0])
-        selected_member = discord.utils.get(self.recipients, id=selected_id)
-
-        if selected_member:
-            modal = FeedbackModal(self.cog, selected_member)
-            await interaction.response.send_modal(modal)
-        else:
-            await interaction.response.send_message(
-                "Error: Could not find selected recipient.",
-                ephemeral=True
-            )
+# ==================== UI COMPONENTS ====================
 
 
 class FeedbackModal(discord.ui.Modal):
     """Modal for submitting feedback."""
 
-    def __init__(self, cog, recipient: discord.Member):
-        super().__init__(title=f"Feedback for {recipient.display_name}")
+    feedback = discord.ui.TextInput(
+        label="Your Feedback (Anonymous)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Your feedback will be posted anonymously...",
+        required=True,
+        max_length=2000
+    )
+
+    def __init__(self, cog: "AnonMail", recipient: discord.Member):
+        super().__init__(title=f"Feedback for {recipient.display_name}"[:45])
         self.cog = cog
         self.recipient = recipient
 
-        self.feedback = discord.ui.TextInput(
-            label="Your Feedback (Anonymous)",
-            style=discord.TextStyle.paragraph,
-            placeholder="Your feedback will be posted anonymously...",
-            required=True,
-            max_length=2000
-        )
-        self.add_item(self.feedback)
-
     async def on_submit(self, interaction: discord.Interaction):
-        """Process the feedback submission."""
         try:
-            guild_config = self.cog.config.guild(interaction.guild)
-            channel_id = await guild_config.feedback_channel()
-
+            channel_id = await self.cog.config.guild(interaction.guild).feedback_channel()
             if not channel_id:
-                await interaction.response.send_message(
-                    "Error: Feedback channel not configured. Contact an admin.",
-                    ephemeral=True
-                )
+                await interaction.response.send_message("Feedback channel not configured.", ephemeral=True)
                 return
 
             channel = interaction.guild.get_channel(channel_id)
             if not channel:
-                await interaction.response.send_message(
-                    "Error: Feedback channel not found. Contact an admin.",
-                    ephemeral=True
-                )
+                await interaction.response.send_message("Feedback channel not found.", ephemeral=True)
                 return
 
-            # Find or create thread for this recipient
-            thread = await self.find_or_create_thread(channel, self.recipient)
+            thread = await self._find_or_create_thread(channel)
 
-            # Post anonymous feedback
             embed = discord.Embed(
                 title="Anonymous Feedback",
                 description=self.feedback.value,
@@ -114,61 +55,193 @@ class FeedbackModal(discord.ui.Modal):
                 timestamp=discord.utils.utcnow()
             )
             await thread.send(embed=embed)
-
-            # Record cooldown
-            await self.cog.record_feedback_use(interaction.guild.id, interaction.user.id)
+            await self.cog._record_use(interaction.guild.id, interaction.user.id)
 
             await interaction.response.send_message(
                 f"Your anonymous feedback for {self.recipient.display_name} has been submitted!",
                 ephemeral=True
             )
-
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "I don't have permission to post feedback. Contact an admin.",
-                ephemeral=True
-            )
         except Exception as e:
             log.error(f"Error submitting feedback: {e}")
-            await interaction.response.send_message(
-                "An error occurred. Please try again or contact an admin.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("An error occurred.", ephemeral=True)
 
-    async def find_or_create_thread(
-        self, channel: discord.TextChannel, recipient: discord.Member
-    ) -> discord.Thread:
-        """Find existing thread or create new one for recipient."""
-        guild_config = self.cog.config.guild(channel.guild)
-        thread_prefix = await guild_config.thread_prefix()
-        thread_name = f"{thread_prefix}{recipient.display_name}"
+    async def _find_or_create_thread(self, channel: discord.TextChannel) -> discord.Thread:
+        prefix = await self.cog.config.guild(channel.guild).thread_prefix()
+        thread_name = f"{prefix}{self.recipient.display_name}"
 
-        # Search existing threads
         for thread in channel.threads:
             if thread.name == thread_name:
                 return thread
 
-        # Check archived threads
         async for thread in channel.archived_threads(limit=100):
             if thread.name == thread_name:
-                # Unarchive it
                 await thread.edit(archived=False)
                 return thread
 
-        # Create new thread
-        thread = await channel.create_thread(
+        return await channel.create_thread(
             name=thread_name,
             type=discord.ChannelType.public_thread,
-            reason=f"Feedback thread for {recipient.display_name}"
+            reason=f"Feedback thread for {self.recipient.display_name}"
         )
-        return thread
+
+
+class RecipientSelect(discord.ui.Select):
+    """Select menu for choosing feedback recipient."""
+
+    def __init__(self, cog: "AnonMail", recipients: List[discord.Member]):
+        self.cog = cog
+        options = [
+            discord.SelectOption(label=m.display_name[:100], value=str(m.id))
+            for m in recipients[:25]
+        ]
+        super().__init__(placeholder="Select a recipient...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        member = interaction.guild.get_member(int(self.values[0]))
+        if member:
+            await interaction.response.send_modal(FeedbackModal(self.cog, member))
+        else:
+            await interaction.response.send_message("Recipient not found.", ephemeral=True)
+
+
+class FeedbackView(discord.ui.View):
+    """View for selecting feedback recipient."""
+
+    def __init__(self, cog: "AnonMail", recipients: List[discord.Member]):
+        super().__init__(timeout=180)
+        self.add_item(RecipientSelect(cog, recipients))
+
+
+class SettingsModal(discord.ui.Modal, title="AnonMail Settings"):
+    """Modal for text-based settings."""
+
+    thread_prefix = discord.ui.TextInput(
+        label="Thread Prefix",
+        placeholder="Feedback - ",
+        required=False,
+        max_length=50,
+    )
+    cooldown = discord.ui.TextInput(
+        label="Cooldown (minutes, 0 to disable)",
+        placeholder="60",
+        required=False,
+        max_length=4,
+    )
+
+    def __init__(self, cog: "AnonMail", current_prefix: str, current_cooldown: int):
+        super().__init__()
+        self.cog = cog
+        self.thread_prefix.default = current_prefix
+        self.cooldown.default = str(current_cooldown)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        prefix = self.thread_prefix.value.strip() or "Feedback - "
+        await self.cog.config.guild(interaction.guild).thread_prefix.set(prefix)
+
+        cooldown = 60
+        if self.cooldown.value.strip():
+            try:
+                cooldown = max(0, int(self.cooldown.value.strip()))
+            except ValueError:
+                pass
+        await self.cog.config.guild(interaction.guild).cooldown_minutes.set(cooldown)
+
+        await interaction.response.send_message(
+            f"Settings updated!\n**Prefix:** `{prefix}`\n**Cooldown:** {cooldown} min",
+            ephemeral=True
+        )
+
+
+class ChannelSelect(discord.ui.Select):
+    """Select for choosing feedback channel."""
+
+    def __init__(self, cog: "AnonMail", channels: List[discord.TextChannel], current_id: Optional[int]):
+        self.cog = cog
+        options = [discord.SelectOption(label="None (Clear)", value="none", emoji="🚫")]
+        for ch in channels[:24]:
+            options.append(discord.SelectOption(
+                label=f"#{ch.name}"[:100],
+                value=str(ch.id),
+                description=ch.category.name[:50] if ch.category else None,
+                default=ch.id == current_id
+            ))
+        super().__init__(placeholder="Select feedback channel...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        channel_id = None if value == "none" else int(value)
+        await self.cog.config.guild(interaction.guild).feedback_channel.set(channel_id)
+        display = f"<#{channel_id}>" if channel_id else "None"
+        await interaction.response.send_message(f"Feedback channel set to {display}", ephemeral=True)
+
+
+class RoleSelect(discord.ui.Select):
+    """Select for choosing recipient/sender role."""
+
+    def __init__(self, cog: "AnonMail", roles: List[discord.Role], setting: str, current_id: Optional[int]):
+        self.cog = cog
+        self.setting = setting
+        options = [discord.SelectOption(label="None (Anyone)" if setting == "sender" else "None", value="none", emoji="🚫")]
+        for r in roles[:24]:
+            if not r.is_default() and not r.managed:
+                options.append(discord.SelectOption(
+                    label=r.name[:100],
+                    value=str(r.id),
+                    default=r.id == current_id
+                ))
+        super().__init__(placeholder=f"Select {setting} role...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        role_id = None if value == "none" else int(value)
+        if self.setting == "recipient":
+            await self.cog.config.guild(interaction.guild).recipient_role.set(role_id)
+        else:
+            await self.cog.config.guild(interaction.guild).sender_role.set(role_id)
+        display = f"<@&{role_id}>" if role_id else "None"
+        await interaction.response.send_message(f"{self.setting.title()} role set to {display}", ephemeral=True)
+
+
+class SetupView(discord.ui.View):
+    """Interactive setup view."""
+
+    def __init__(self, cog: "AnonMail", guild: discord.Guild, config: dict):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+        channels = [ch for ch in guild.text_channels
+                    if ch.permissions_for(guild.me).send_messages and ch.permissions_for(guild.me).view_channel]
+        channels.sort(key=lambda c: (c.category.position if c.category else -1, c.position))
+
+        roles = sorted(guild.roles, key=lambda r: r.position, reverse=True)
+
+        self.add_item(ChannelSelect(cog, channels, config["feedback_channel"]))
+        self.add_item(RoleSelect(cog, roles, "recipient", config["recipient_role"]))
+        self.add_item(RoleSelect(cog, roles, "sender", config["sender_role"]))
+
+    @discord.ui.button(label="More Settings", style=discord.ButtonStyle.primary, emoji="⚙️", row=3)
+    async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        config = await self.cog.config.guild(interaction.guild).all()
+        await interaction.response.send_modal(SettingsModal(
+            self.cog, config["thread_prefix"], config["cooldown_minutes"]
+        ))
+
+    @discord.ui.button(label="Enable", style=discord.ButtonStyle.success, emoji="✅", row=3)
+    async def enable_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.config.guild(interaction.guild).enabled.set(True)
+        await interaction.response.send_message("AnonMail **enabled**.", ephemeral=True)
+
+    @discord.ui.button(label="Disable", style=discord.ButtonStyle.danger, emoji="❌", row=3)
+    async def disable_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.config.guild(interaction.guild).enabled.set(False)
+        await interaction.response.send_message("AnonMail **disabled**.", ephemeral=True)
+
+
+# ==================== MAIN COG ====================
 
 
 class AnonMail(commands.Cog):
-    """Anonymous feedback system - users can submit feedback to role members."""
-
-    __version__ = "2.0.0"
-    __author__ = "ShadyTidus"
+    """Anonymous feedback system."""
 
     def __init__(self, bot: Red) -> None:
         self.bot = bot
@@ -176,340 +249,186 @@ class AnonMail(commands.Cog):
 
         default_guild = {
             "enabled": False,
-            "recipient_role": None,  # Role ID whose members can receive feedback
-            "sender_role": None,  # Role ID required to send feedback (None = anyone)
-            "feedback_channel": None,  # Channel ID for feedback threads
+            "recipient_role": None,
+            "sender_role": None,
+            "feedback_channel": None,
             "thread_prefix": "Feedback - ",
-            "cooldown_minutes": 60,  # Cooldown between feedback submissions
-            "banned_users": [],  # List of user IDs banned from sending feedback
-            "mod_roles": [],  # List of role IDs that can manage settings
+            "cooldown_minutes": 60,
+            "banned_users": [],
+            "mod_roles": [],
         }
         self.config.register_guild(**default_guild)
-
-        # In-memory cooldown tracking: {guild_id: {user_id: timestamp}}
         self._cooldowns: dict[int, dict[int, float]] = {}
 
-    async def record_feedback_use(self, guild_id: int, user_id: int) -> None:
-        """Record that a user submitted feedback."""
-        if guild_id not in self._cooldowns:
-            self._cooldowns[guild_id] = {}
-        self._cooldowns[guild_id][user_id] = time.time()
+    async def _record_use(self, guild_id: int, user_id: int) -> None:
+        self._cooldowns.setdefault(guild_id, {})[user_id] = time.time()
 
-    async def check_cooldown(self, guild_id: int, user_id: int) -> Optional[float]:
-        """Check if user is on cooldown. Returns seconds remaining or None."""
+    async def _check_cooldown(self, guild_id: int, user_id: int) -> Optional[float]:
         cooldown_minutes = await self.config.guild_from_id(guild_id).cooldown_minutes()
-
         if cooldown_minutes <= 0:
             return None
-
-        guild_cooldowns = self._cooldowns.get(guild_id, {})
-        last_use = guild_cooldowns.get(user_id)
-
+        last_use = self._cooldowns.get(guild_id, {}).get(user_id)
         if last_use is None:
             return None
-
-        cooldown_seconds = cooldown_minutes * 60
-        elapsed = time.time() - last_use
-        remaining = cooldown_seconds - elapsed
-
+        remaining = (cooldown_minutes * 60) - (time.time() - last_use)
         return remaining if remaining > 0 else None
 
-    async def is_banned(self, guild_id: int, user_id: int) -> bool:
-        """Check if user is banned from sending feedback."""
-        banned_users = await self.config.guild_from_id(guild_id).banned_users()
-        return user_id in banned_users
-
     async def is_authorized(self, ctx: commands.Context) -> bool:
-        """Check if user has permission to manage settings."""
-        # Bot owner always authorized
         if await self.bot.is_owner(ctx.author):
             return True
-
         if not isinstance(ctx.author, discord.Member):
             return False
-
-        # Admin/guild owner always authorized
         if ctx.author.guild_permissions.administrator or ctx.author == ctx.guild.owner:
             return True
-
-        # Check for configured mod roles
         mod_roles = await self.config.guild(ctx.guild).mod_roles()
         return any(role.id in mod_roles for role in ctx.author.roles)
 
-    @commands.hybrid_command(name="feedback")
-    @commands.guild_only()
-    async def feedback_command(self, ctx: commands.Context):
+    # ==================== USER COMMANDS ====================
+
+    @app_commands.command(name="feedback", description="Submit anonymous feedback")
+    @app_commands.guild_only()
+    async def feedback_slash(self, interaction: discord.Interaction):
         """Submit anonymous feedback to a recipient."""
-        guild_config = self.config.guild(ctx.guild)
+        config = await self.config.guild(interaction.guild).all()
 
-        # Delete command message immediately for privacy
-        try:
-            await ctx.message.delete()
-        except discord.Forbidden:
-            pass
-
-        # Check if enabled
-        if not await guild_config.enabled():
-            await ctx.send("Anonymous feedback is not enabled on this server.", delete_after=10)
+        if not config["enabled"]:
+            await interaction.response.send_message("Anonymous feedback is not enabled.", ephemeral=True)
             return
 
-        # Check if user is banned
-        if await self.is_banned(ctx.guild.id, ctx.author.id):
-            await ctx.send(
-                "You are banned from using the feedback system.",
-                delete_after=10
+        if interaction.user.id in config["banned_users"]:
+            await interaction.response.send_message("You are banned from using feedback.", ephemeral=True)
+            return
+
+        remaining = await self._check_cooldown(interaction.guild.id, interaction.user.id)
+        if remaining:
+            await interaction.response.send_message(
+                f"Please wait **{int(remaining // 60)}m {int(remaining % 60)}s**.",
+                ephemeral=True
             )
             return
 
-        # Check cooldown
-        remaining = await self.check_cooldown(ctx.guild.id, ctx.author.id)
-        if remaining is not None:
-            minutes = int(remaining // 60)
-            seconds = int(remaining % 60)
-            await ctx.send(
-                f"Please wait **{minutes}m {seconds}s** before submitting more feedback.",
-                delete_after=10
-            )
-            return
-
-        # Check sender role if configured
-        sender_role_id = await guild_config.sender_role()
-        if sender_role_id:
-            sender_role = ctx.guild.get_role(sender_role_id)
-            if sender_role and sender_role not in ctx.author.roles:
-                await ctx.send(
-                    f"You need the `{sender_role.name}` role to submit feedback.",
-                    delete_after=10
-                )
+        if config["sender_role"]:
+            role = interaction.guild.get_role(config["sender_role"])
+            if role and role not in interaction.user.roles:
+                await interaction.response.send_message(f"You need the `{role.name}` role.", ephemeral=True)
                 return
 
-        # Get recipients
-        recipient_role_id = await guild_config.recipient_role()
-        if not recipient_role_id:
-            await ctx.send("Recipient role not configured. Contact an admin.", delete_after=10)
+        if not config["recipient_role"]:
+            await interaction.response.send_message("Recipient role not configured.", ephemeral=True)
             return
 
-        recipient_role = ctx.guild.get_role(recipient_role_id)
-        if not recipient_role:
-            await ctx.send("Recipient role not found. Contact an admin.", delete_after=10)
+        role = interaction.guild.get_role(config["recipient_role"])
+        if not role:
+            await interaction.response.send_message("Recipient role not found.", ephemeral=True)
             return
 
-        recipients = [m for m in recipient_role.members if not m.bot]
+        recipients = [m for m in role.members if not m.bot]
         if not recipients:
-            await ctx.send("No recipients available.", delete_after=10)
+            await interaction.response.send_message("No recipients available.", ephemeral=True)
             return
 
-        # Show selection view
-        view = FeedbackSelectView(self, recipients)
-        await ctx.send(
-            "Select a recipient to submit anonymous feedback:",
-            view=view,
-            delete_after=180
+        await interaction.response.send_message(
+            "Select a recipient:",
+            view=FeedbackView(self, recipients),
+            ephemeral=True
         )
 
-    @commands.hybrid_group(name="anonmailset")
+    # ==================== ADMIN COMMANDS ====================
+
+    @commands.hybrid_group(name="anonmail")
     @commands.guild_only()
-    async def anonmailset(self, ctx: commands.Context):
-        """Configure anonymous feedback settings."""
+    async def anonmail(self, ctx: commands.Context):
+        """Manage anonymous feedback settings."""
         if not await self.is_authorized(ctx):
-            await ctx.send("You don't have permission to manage AnonMail settings.", ephemeral=True)
+            await ctx.send("You don't have permission.", ephemeral=True)
             return
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
 
-    @anonmailset.command(name="enable")
-    @app_commands.describe(enabled="Enable or disable anonymous feedback")
-    async def anonmailset_enable(self, ctx: commands.Context, enabled: bool):
-        """Enable or disable anonymous feedback."""
-        await self.config.guild(ctx.guild).enabled.set(enabled)
-        status = "enabled" if enabled else "disabled"
-        await ctx.send(f"✅ Anonymous feedback {status}.")
+    @anonmail.command(name="setup")
+    async def anonmail_setup(self, ctx: commands.Context):
+        """Interactive setup for AnonMail."""
+        config = await self.config.guild(ctx.guild).all()
 
-    @anonmailset.command(name="recipientrole")
-    @app_commands.describe(role="Role whose members can receive feedback")
-    async def anonmailset_recipientrole(self, ctx: commands.Context, role: discord.Role):
-        """Set the role whose members can receive feedback."""
-        await self.config.guild(ctx.guild).recipient_role.set(role.id)
-        await ctx.send(f"✅ Recipient role set to `{role.name}`.")
+        embed = discord.Embed(title="📬 AnonMail Setup", color=discord.Color.blue())
+        embed.add_field(name="Status", value="✅ Enabled" if config["enabled"] else "❌ Disabled", inline=True)
+        embed.add_field(name="Channel", value=f"<#{config['feedback_channel']}>" if config["feedback_channel"] else "Not set", inline=True)
+        embed.add_field(name="Recipient Role", value=f"<@&{config['recipient_role']}>" if config["recipient_role"] else "Not set", inline=True)
+        embed.add_field(name="Sender Role", value=f"<@&{config['sender_role']}>" if config["sender_role"] else "Anyone", inline=True)
+        embed.add_field(name="Cooldown", value=f"{config['cooldown_minutes']} min", inline=True)
+        embed.add_field(name="Prefix", value=f"`{config['thread_prefix']}`", inline=True)
 
-    @anonmailset.command(name="senderrole")
-    @app_commands.describe(role="Role required to send feedback (leave empty for anyone)")
-    async def anonmailset_senderrole(
-        self, ctx: commands.Context, role: Optional[discord.Role] = None
-    ):
-        """Set the role required to send feedback (leave empty for anyone)."""
-        if role:
-            await self.config.guild(ctx.guild).sender_role.set(role.id)
-            await ctx.send(f"✅ Sender role set to `{role.name}`.")
-        else:
-            await self.config.guild(ctx.guild).sender_role.set(None)
-            await ctx.send("✅ Sender role cleared. Anyone can submit feedback.")
+        await ctx.send(embed=embed, view=SetupView(self, ctx.guild, config))
 
-    @anonmailset.command(name="channel")
-    @app_commands.describe(channel="Channel where feedback threads will be created")
-    async def anonmailset_channel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set the channel for feedback threads."""
-        await self.config.guild(ctx.guild).feedback_channel.set(channel.id)
-        await ctx.send(f"✅ Feedback channel set to {channel.mention}.")
+    @anonmail.command(name="status")
+    async def anonmail_status(self, ctx: commands.Context):
+        """Show current AnonMail configuration."""
+        config = await self.config.guild(ctx.guild).all()
 
-    @anonmailset.command(name="prefix")
-    @app_commands.describe(prefix="Thread name prefix (e.g., 'Feedback - ')")
-    async def anonmailset_prefix(self, ctx: commands.Context, *, prefix: str):
-        """Set the thread name prefix."""
-        await self.config.guild(ctx.guild).thread_prefix.set(prefix)
-        await ctx.send(f"✅ Thread prefix set to: `{prefix}`")
+        embed = discord.Embed(title="📬 AnonMail Status", color=discord.Color.blue())
+        embed.add_field(name="Enabled", value="✅ Yes" if config["enabled"] else "❌ No", inline=True)
+        embed.add_field(name="Channel", value=f"<#{config['feedback_channel']}>" if config["feedback_channel"] else "Not set", inline=True)
+        embed.add_field(name="Recipient Role", value=f"<@&{config['recipient_role']}>" if config["recipient_role"] else "Not set", inline=True)
+        embed.add_field(name="Sender Role", value=f"<@&{config['sender_role']}>" if config["sender_role"] else "Anyone", inline=True)
+        embed.add_field(name="Cooldown", value=f"{config['cooldown_minutes']} min", inline=True)
+        embed.add_field(name="Banned Users", value=str(len(config["banned_users"])), inline=True)
 
-    @anonmailset.command(name="cooldown")
-    @app_commands.describe(minutes="Minutes between submissions (0 to disable)")
-    async def anonmailset_cooldown(self, ctx: commands.Context, minutes: int):
-        """Set the cooldown between feedback submissions (0 to disable)."""
-        if minutes < 0:
-            await ctx.send("❌ Cooldown must be 0 or positive.")
-            return
-
-        await self.config.guild(ctx.guild).cooldown_minutes.set(minutes)
-        if minutes == 0:
-            await ctx.send("✅ Cooldown disabled. Users can submit feedback anytime.")
-        else:
-            await ctx.send(f"✅ Cooldown set to {minutes} minutes between submissions.")
-
-    @anonmailset.command(name="ban")
-    @app_commands.describe(user="User to ban from feedback system")
-    async def anonmailset_ban(self, ctx: commands.Context, user: discord.User):
-        """Ban a user from using the feedback system."""
-        async with self.config.guild(ctx.guild).banned_users() as banned:
-            if user.id in banned:
-                await ctx.send(f"❌ {user.mention} is already banned.")
-                return
-            banned.append(user.id)
-
-        await ctx.send(f"✅ {user.mention} is now banned from using feedback.")
-
-    @anonmailset.command(name="unban")
-    @app_commands.describe(user="User to unban from feedback system")
-    async def anonmailset_unban(self, ctx: commands.Context, user: discord.User):
-        """Unban a user from the feedback system."""
-        async with self.config.guild(ctx.guild).banned_users() as banned:
-            if user.id not in banned:
-                await ctx.send(f"❌ {user.mention} is not banned.")
-                return
-            banned.remove(user.id)
-
-        await ctx.send(f"✅ {user.mention} can now use feedback again.")
-
-    @anonmailset.command(name="banned")
-    async def anonmailset_banned(self, ctx: commands.Context):
-        """List all banned users."""
-        banned_ids = await self.config.guild(ctx.guild).banned_users()
-
-        if not banned_ids:
-            await ctx.send("No users are banned from feedback.")
-            return
-
-        user_mentions = []
-        for user_id in banned_ids:
-            user = self.bot.get_user(user_id)
-            if user:
-                user_mentions.append(f"{user.mention} ({user.id})")
-            else:
-                user_mentions.append(f"Unknown ({user_id})")
-
-        embed = discord.Embed(
-            title="🚫 Banned Users",
-            description="\n".join(user_mentions),
-            color=discord.Color.red(),
-        )
         await ctx.send(embed=embed)
 
-    @anonmailset.command(name="addrole")
-    @app_commands.describe(role="Role that can manage AnonMail settings")
-    async def anonmailset_addrole(self, ctx: commands.Context, role: discord.Role):
-        """Add a role that can manage AnonMail settings."""
+    @anonmail.command(name="ban")
+    @app_commands.describe(user="User to ban from feedback")
+    async def anonmail_ban(self, ctx: commands.Context, user: discord.User):
+        """Ban a user from using feedback."""
+        async with self.config.guild(ctx.guild).banned_users() as banned:
+            if user.id in banned:
+                await ctx.send(f"{user.mention} is already banned.")
+                return
+            banned.append(user.id)
+        await ctx.send(f"✅ {user.mention} banned from feedback.")
+
+    @anonmail.command(name="unban")
+    @app_commands.describe(user="User to unban")
+    async def anonmail_unban(self, ctx: commands.Context, user: discord.User):
+        """Unban a user from feedback."""
+        async with self.config.guild(ctx.guild).banned_users() as banned:
+            if user.id not in banned:
+                await ctx.send(f"{user.mention} is not banned.")
+                return
+            banned.remove(user.id)
+        await ctx.send(f"✅ {user.mention} unbanned.")
+
+    @anonmail.command(name="addrole")
+    @app_commands.describe(role="Role that can manage AnonMail")
+    async def anonmail_addrole(self, ctx: commands.Context, role: discord.Role):
+        """Add a management role."""
         if not ctx.author.guild_permissions.administrator:
-            await ctx.send("Only administrators can manage mod roles.", ephemeral=True)
-            return
+            if not await self.bot.is_owner(ctx.author):
+                await ctx.send("Only administrators can manage roles.", ephemeral=True)
+                return
 
         async with self.config.guild(ctx.guild).mod_roles() as roles:
             if role.id in roles:
-                await ctx.send(f"❌ {role.mention} is already a mod role.", ephemeral=True)
+                await ctx.send(f"{role.mention} is already a mod role.")
                 return
             roles.append(role.id)
+        await ctx.send(f"✅ {role.mention} can now manage AnonMail.")
 
-        await ctx.send(f"✅ {role.mention} can now manage AnonMail settings.")
-
-    @anonmailset.command(name="removerole")
-    @app_commands.describe(role="Role to remove from AnonMail management")
-    async def anonmailset_removerole(self, ctx: commands.Context, role: discord.Role):
-        """Remove a role from AnonMail management."""
+    @anonmail.command(name="removerole")
+    @app_commands.describe(role="Role to remove")
+    async def anonmail_removerole(self, ctx: commands.Context, role: discord.Role):
+        """Remove a management role."""
         if not ctx.author.guild_permissions.administrator:
-            await ctx.send("Only administrators can manage mod roles.", ephemeral=True)
-            return
+            if not await self.bot.is_owner(ctx.author):
+                await ctx.send("Only administrators can manage roles.", ephemeral=True)
+                return
 
         async with self.config.guild(ctx.guild).mod_roles() as roles:
             if role.id not in roles:
-                await ctx.send(f"❌ {role.mention} is not a mod role.", ephemeral=True)
+                await ctx.send(f"{role.mention} is not a mod role.")
                 return
             roles.remove(role.id)
+        await ctx.send(f"✅ {role.mention} removed.")
 
-        await ctx.send(f"✅ {role.mention} can no longer manage AnonMail settings.")
 
-    @anonmailset.command(name="show")
-    async def anonmailset_show(self, ctx: commands.Context):
-        """Show current settings."""
-        guild_config = self.config.guild(ctx.guild)
-
-        enabled = await guild_config.enabled()
-        recipient_role_id = await guild_config.recipient_role()
-        sender_role_id = await guild_config.sender_role()
-        channel_id = await guild_config.feedback_channel()
-        prefix = await guild_config.thread_prefix()
-        cooldown = await guild_config.cooldown_minutes()
-        banned = await guild_config.banned_users()
-        mod_role_ids = await guild_config.mod_roles()
-
-        recipient_role = ctx.guild.get_role(recipient_role_id) if recipient_role_id else None
-        sender_role = ctx.guild.get_role(sender_role_id) if sender_role_id else None
-        channel = ctx.guild.get_channel(channel_id) if channel_id else None
-
-        mod_role_mentions = []
-        for role_id in mod_role_ids:
-            r = ctx.guild.get_role(role_id)
-            if r:
-                mod_role_mentions.append(r.mention)
-
-        embed = discord.Embed(
-            title="📬 AnonMail Settings",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="Enabled", value="✅ Yes" if enabled else "❌ No", inline=True)
-        embed.add_field(
-            name="Recipient Role",
-            value=recipient_role.mention if recipient_role else "Not set",
-            inline=True
-        )
-        embed.add_field(
-            name="Sender Role",
-            value=sender_role.mention if sender_role else "Anyone",
-            inline=True
-        )
-        embed.add_field(
-            name="Feedback Channel",
-            value=channel.mention if channel else "Not set",
-            inline=True
-        )
-        embed.add_field(name="Thread Prefix", value=f"`{prefix}`", inline=True)
-        embed.add_field(
-            name="Cooldown",
-            value=f"{cooldown} minutes" if cooldown > 0 else "Disabled",
-            inline=True
-        )
-        embed.add_field(name="Banned Users", value=str(len(banned)), inline=True)
-        embed.add_field(
-            name="Mod Roles",
-            value=", ".join(mod_role_mentions) if mod_role_mentions else "Admins only",
-            inline=True
-        )
-
-        embed.set_footer(text=f"v{self.__version__}")
-
-        await ctx.send(embed=embed)
+async def setup(bot: Red):
+    await bot.add_cog(AnonMail(bot))
