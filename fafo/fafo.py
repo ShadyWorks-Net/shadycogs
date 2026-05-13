@@ -50,7 +50,8 @@ class FafoView(discord.ui.View):
 
             await member.timeout(until_time, reason="FAFO button clicked.")
             await interaction.followup.send(
-                f"You have been timed out for {self.timeout_minutes} minutes.",
+                f"🏆 **Achievement Unlocked: Consequences**\n\n"
+                f"You have been timed out for **{self.timeout_minutes} minute{'s' if self.timeout_minutes != 1 else ''}**.",
                 ephemeral=True
             )
 
@@ -80,9 +81,10 @@ class Fafo(commands.Cog):
         default_guild = {
             "timeout_minutes": 5,
             "warning_message": (
-                "__**Warning:**__\n"
-                "If you cannot abide by the rules from previous responses,\n"
-                "**Click Below To FAFO**"
+                "This button has been professionally engineered, thoroughly tested, "
+                "and specifically designed to escalate your current situation dramatically.\n\n"
+                "You should absolutely not press it.\n\n"
+                "...but statistically speaking, we both know you're going to."
             ),
             "mod_roles": [],  # Roles that can use FAFO
         }
@@ -120,8 +122,14 @@ class Fafo(commands.Cog):
         timeout_minutes = await self.config.guild(ctx.guild).timeout_minutes()
         warning_message = await self.config.guild(ctx.guild).warning_message()
 
+        embed = discord.Embed(
+            title="⚠️ WARNING ⚠️",
+            description=warning_message,
+            color=discord.Color.red()
+        )
+
         view = FafoView(timeout_minutes=timeout_minutes)
-        msg = await ctx.send(warning_message, view=view)
+        msg = await ctx.send(embed=embed, view=view)
         view.message = msg
 
         # Delete the command message
