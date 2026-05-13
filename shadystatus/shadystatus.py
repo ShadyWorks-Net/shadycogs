@@ -130,24 +130,38 @@ def format_embed(data: Dict, config: Dict, game_type: GameType) -> discord.Embed
 
 
 class AddServerModal(discord.ui.Modal, title="Add Game Server"):
-    """Modal for adding a server."""
+    """Modal for adding a server with all settings."""
 
     name = discord.ui.TextInput(label="Server Name (ID)", placeholder="my-server", max_length=32)
-    ip = discord.ui.TextInput(label="IP Address", placeholder="192.168.1.1")
-    port = discord.ui.TextInput(label="Query Port", placeholder="27015", max_length=5)
-    display = discord.ui.TextInput(label="Display Name (optional)", required=False, max_length=100)
+    ip = discord.ui.TextInput(label="IP:Port", placeholder="192.168.1.1:27015", max_length=50)
+    display = discord.ui.TextInput(label="Display Name", placeholder="My Awesome Server", max_length=100)
+    rate_limit = discord.ui.TextInput(label="Rate Limit (seconds, 0=none)", placeholder="300", max_length=5, required=False)
 
-    def __init__(self, cog: "ShadyStatus", game: str):
+    def __init__(self, cog: "ShadyStatus", game: str, channel_id: Optional[int] = None):
         super().__init__()
         self.cog = cog
         self.game = game
+        self.channel_id = channel_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Parse IP:Port
+        ip_port = self.ip.value.strip()
+        if ":" not in ip_port:
+            await interaction.response.send_message("Invalid format. Use `IP:PORT` (e.g., `192.168.1.1:27015`)", ephemeral=True)
+            return
+
         try:
-            port_num = int(self.port.value)
+            ip, port_str = ip_port.rsplit(":", 1)
+            port_num = int(port_str)
         except ValueError:
             await interaction.response.send_message("Invalid port number.", ephemeral=True)
             return
+
+        # Parse rate limit
+        try:
+            rate = max(0, int(self.rate_limit.value or "300"))
+        except ValueError:
+            rate = 300
 
         name = self.name.value.lower().replace(" ", "-")
 
@@ -157,16 +171,23 @@ class AddServerModal(discord.ui.Modal, title="Add Game Server"):
                 return
 
             servers[name] = {
-                "ip": self.ip.value,
+                "ip": ip,
                 "port": port_num,
                 "game": self.game,
                 "display_name": self.display.value or name,
                 "enabled": True,
+                "post_channel": self.channel_id,  # Per-server channel
+                "rate_limit": rate,  # Per-server rate limit
             }
 
         game_name = GAME_NAMES.get(GameType(self.game), self.game)
+        channel_str = f"<#{self.channel_id}>" if self.channel_id else "same channel"
         await interaction.response.send_message(
-            f"✅ Added **{self.display.value or name}** ({game_name}) at `{self.ip.value}:{port_num}`"
+            f"✅ Added **{self.display.value or name}** ({game_name})\n"
+            f"📍 `{ip}:{port_num}`\n"
+            f"📢 Posts to: {channel_str}\n"
+            f"⏱️ Rate limit: {rate}s",
+            ephemeral=True
         )
 
 
@@ -179,18 +200,69 @@ class GameSelect(discord.ui.Select):
             discord.SelectOption(label=GAME_NAMES[gt], value=gt.value, emoji=GAME_EMOJIS[gt])
             for gt in GameType
         ]
-        super().__init__(placeholder="Select game type...", options=options)
+        super().__init__(placeholder="1️⃣ Select game type...", options=options, row=0)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(AddServerModal(self.cog, self.values[0]))
+        # Store selection and prompt for channel
+        self.view.selected_game = self.values[0]
+        game_name = GAME_NAMES.get(GameType(self.values[0]), self.values[0])
+        await interaction.response.send_message(
+            f"Selected **{game_name}**. Now select a post channel below, then click **Continue**.",
+            ephemeral=True
+        )
+
+
+class ServerChannelSelect(discord.ui.Select):
+    """Select channel for new server."""
+
+    def __init__(self, cog: "ShadyStatus", channels: List[discord.TextChannel]):
+        self.cog = cog
+        options = [discord.SelectOption(label="Same Channel (where command is run)", value="none", emoji="💬")]
+        for ch in channels[:24]:
+            options.append(discord.SelectOption(
+                label=f"#{ch.name}"[:100],
+                value=str(ch.id),
+                description=ch.category.name[:50] if ch.category else None
+            ))
+        super().__init__(placeholder="2️⃣ Select post channel...", options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        self.view.selected_channel = None if value == "none" else int(value)
+        channel_str = f"<#{self.view.selected_channel}>" if self.view.selected_channel else "same channel"
+        await interaction.response.send_message(
+            f"Posts will go to {channel_str}. Click **Continue** to enter server details.",
+            ephemeral=True
+        )
 
 
 class AddServerView(discord.ui.View):
-    """View for adding a server."""
+    """View for adding a server - select game and channel first."""
 
-    def __init__(self, cog: "ShadyStatus"):
-        super().__init__(timeout=120)
+    def __init__(self, cog: "ShadyStatus", guild: discord.Guild):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.selected_game = None
+        self.selected_channel = None
+
+        # Add game select
         self.add_item(GameSelect(cog))
+
+        # Add channel select
+        channels = [ch for ch in guild.text_channels
+                    if ch.permissions_for(guild.me).send_messages]
+        channels.sort(key=lambda c: (c.category.position if c.category else -1, c.position))
+        self.add_item(ServerChannelSelect(cog, channels))
+
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.green, emoji="➡️", row=2)
+    async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.selected_game:
+            await interaction.response.send_message("Please select a game type first.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(
+            AddServerModal(self.cog, self.selected_game, self.selected_channel)
+        )
 
 
 class SettingsModal(discord.ui.Modal, title="ShadyStatus Settings"):
@@ -335,7 +407,11 @@ class ShadyStatus(commands.Cog):
             await interaction.response.send_message(f"Server `{name}` is disabled.", ephemeral=True)
             return
 
-        rate_limit = await self.config.guild(interaction.guild).rate_limit_seconds()
+        # Use per-server rate limit, fall back to global
+        rate_limit = cfg.get("rate_limit")
+        if rate_limit is None:
+            rate_limit = await self.config.guild(interaction.guild).rate_limit_seconds()
+
         remaining = self._check_rate_limit(interaction.guild.id, interaction.user.id, name, rate_limit)
         if remaining:
             await interaction.response.send_message(
@@ -363,7 +439,11 @@ class ShadyStatus(commands.Cog):
         embed.set_footer(text=f"{interaction.user.display_name} • {cfg['ip']}:{cfg['port']}")
         embed.timestamp = datetime.now(timezone.utc)
 
-        post_channel = await self.config.guild(interaction.guild).post_channel()
+        # Use per-server post channel, fall back to global
+        post_channel = cfg.get("post_channel")
+        if post_channel is None:
+            post_channel = await self.config.guild(interaction.guild).post_channel()
+
         if post_channel and post_channel != interaction.channel_id:
             channel = interaction.guild.get_channel(post_channel)
             if channel:
@@ -412,21 +492,57 @@ class ShadyStatus(commands.Cog):
     @shadystatus.command(name="setup")
     @app_commands.describe()
     async def shadystatus_setup(self, ctx: commands.Context):
-        """Interactive setup."""
+        """View configured servers and settings."""
         config = await self.config.guild(ctx.guild).all()
+        servers = config.get("servers", {})
 
         embed = discord.Embed(title="🎮 ShadyStatus Setup", color=discord.Color.blue())
-        embed.add_field(name="Servers", value=str(len(config["servers"])), inline=True)
-        embed.add_field(name="Rate Limit", value=f"{config['rate_limit_seconds']}s", inline=True)
-        embed.add_field(name="Post Channel", value=f"<#{config['post_channel']}>" if config["post_channel"] else "Same channel", inline=True)
 
-        await ctx.send(embed=embed, view=SetupView(self, ctx.guild, config))
+        if not servers:
+            embed.description = "No servers configured.\n\nUse `/shadystatus add` to add a server."
+        else:
+            for name, cfg in list(servers.items())[:10]:
+                game = GAME_NAMES.get(GameType(cfg.get("game", "generic")), cfg.get("game", "?"))
+                status = "✅" if cfg.get("enabled", True) else "❌"
+                channel = f"<#{cfg['post_channel']}>" if cfg.get("post_channel") else "Same channel"
+                rate = cfg.get("rate_limit", config.get("rate_limit_seconds", 300))
+
+                embed.add_field(
+                    name=f"{status} {cfg.get('display_name', name)}",
+                    value=f"**Game:** {game}\n**IP:** `{cfg['ip']}:{cfg['port']}`\n**Channel:** {channel}\n**Rate:** {rate}s",
+                    inline=True
+                )
+
+            if len(servers) > 10:
+                embed.set_footer(text=f"Showing 10 of {len(servers)} servers")
+
+        embed.add_field(
+            name="Commands",
+            value=(
+                "`/shadystatus add` - Add a server\n"
+                "`/shadystatus remove <name>` - Remove a server\n"
+                "`/shadystatus toggle <name>` - Enable/disable\n"
+                "`/shadystatus test <name>` - Test query"
+            ),
+            inline=False
+        )
+
+        await ctx.send(embed=embed)
 
     @shadystatus.command(name="add")
     @app_commands.describe()
     async def shadystatus_add(self, ctx: commands.Context):
         """Add a game server."""
-        await ctx.send("Select game type:", view=AddServerView(self))
+        embed = discord.Embed(
+            title="🎮 Add Game Server",
+            description=(
+                "**Step 1:** Select the game type\n"
+                "**Step 2:** Select where to post status\n"
+                "**Step 3:** Click Continue and fill in server details"
+            ),
+            color=discord.Color.blue()
+        )
+        await ctx.send(embed=embed, view=AddServerView(self, ctx.guild))
 
     @shadystatus.command(name="remove")
     @app_commands.describe(name="Server ID to remove")
