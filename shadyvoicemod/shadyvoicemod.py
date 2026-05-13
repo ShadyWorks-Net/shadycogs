@@ -382,6 +382,26 @@ class ShadyVoiceMod(commands.Cog):
         mod_roles = await self.config.guild(guild).mod_roles()
         return any(role.id in mod_roles for role in user.roles)
 
+    async def bot_channel_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        """Autocomplete for channels the bot can see and send messages to."""
+        if not interaction.guild:
+            return []
+
+        choices = []
+        for channel in interaction.guild.text_channels:
+            perms = channel.permissions_for(interaction.guild.me)
+            if perms.view_channel and perms.send_messages:
+                if current.lower() in channel.name.lower():
+                    label = f"#{channel.name}"
+                    if channel.category:
+                        label = f"#{channel.name} ({channel.category.name})"
+                    choices.append(app_commands.Choice(name=label[:100], value=str(channel.id)))
+
+        choices.sort(key=lambda c: int(c.value))
+        return choices[:25]
+
     async def cog_load(self) -> None:
         """Start background task on cog load."""
         self.expiry_task = asyncio.create_task(self.check_expired_mutes())
@@ -770,7 +790,7 @@ class ShadyVoiceMod(commands.Cog):
             )
 
             view = StackedMuteView(self, member, current_mute)
-            await ctx.send(embed=embed, view=view)
+            await ctx.send(embed=embed, view=view, ephemeral=True)
             return
 
         # Calculate expiry
@@ -960,15 +980,24 @@ class ShadyVoiceMod(commands.Cog):
             await ctx.send(embed=embed)
 
     @vmod_settings.command(name="logchannel")
-    @app_commands.describe(channel="Audit log channel (leave empty to disable)")
-    async def set_log_channel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+    @app_commands.describe(channel="Audit log channel (bot-visible channels, leave empty to disable)")
+    @app_commands.autocomplete(channel=bot_channel_autocomplete)
+    async def set_log_channel(self, ctx: commands.Context, channel: str = None):
         """Set the audit log channel for voice mod actions."""
         if channel is None:
             await self.config.guild(ctx.guild).log_channel.set(None)
             return await ctx.send("✅ Audit logging disabled.")
 
-        await self.config.guild(ctx.guild).log_channel.set(channel.id)
-        await ctx.send(f"✅ Audit log channel set to {channel.mention}.")
+        try:
+            channel_id = int(channel)
+            ch = ctx.guild.get_channel(channel_id)
+            if not ch:
+                await ctx.send("Channel not found.", ephemeral=True)
+                return
+            await self.config.guild(ctx.guild).log_channel.set(channel_id)
+            await ctx.send(f"✅ Audit log channel set to {ch.mention}.")
+        except ValueError:
+            await ctx.send("Invalid channel.", ephemeral=True)
 
     @vmod_settings.command(name="addrole")
     @app_commands.describe(role="Role to grant voice mod permissions")

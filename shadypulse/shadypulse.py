@@ -13,6 +13,7 @@ from enum import Enum
 
 from redbot.core import commands, Config
 from redbot.core.bot import Red
+from typing import List
 
 log = logging.getLogger("red.shadycogs.shadypulse")
 
@@ -289,6 +290,26 @@ class ShadyPulse(commands.Cog):
 
         return False
 
+    async def bot_channel_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        """Autocomplete for channels the bot can see and send messages to."""
+        if not interaction.guild:
+            return []
+
+        choices = []
+        for channel in interaction.guild.text_channels:
+            perms = channel.permissions_for(interaction.guild.me)
+            if perms.view_channel and perms.send_messages:
+                if current.lower() in channel.name.lower():
+                    label = f"#{channel.name}"
+                    if channel.category:
+                        label = f"#{channel.name} ({channel.category.name})"
+                    choices.append(app_commands.Choice(name=label[:100], value=str(channel.id)))
+
+        choices.sort(key=lambda c: int(c.value))
+        return choices[:25]
+
     # ==================== STAFF COMMANDS ====================
 
     @app_commands.command(name="pulse", description="Health monitoring dashboard")
@@ -380,7 +401,7 @@ class ShadyPulse(commands.Cog):
         embed.add_field(name="Monitored Cogs", value=str(len(config["monitored_cogs"])), inline=True)
         embed.add_field(name="Auto-Reload", value="✅" if config["cog_auto_reload"] else "❌", inline=True)
 
-        await ctx.send(embed=embed, view=SetupView(self, config))
+        await ctx.send(embed=embed, view=SetupView(self, config), ephemeral=True)
 
     @shadypulse.command(name="status")
     async def pulse_status(self, ctx: commands.Context):
@@ -400,11 +421,25 @@ class ShadyPulse(commands.Cog):
         await ctx.send(embed=embed)
 
     @shadypulse.command(name="alert")
-    @app_commands.describe(channel="Alert channel (leave empty to disable)")
-    async def pulse_alert(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
-        """Set alert channel."""
-        await self.config.alert_channel.set(channel.id if channel else None)
-        await ctx.send(f"Alerts: {channel.mention if channel else 'Disabled'}")
+    @app_commands.describe(channel="Alert channel (bot-visible channels, leave empty to disable)")
+    @app_commands.autocomplete(channel=bot_channel_autocomplete)
+    async def pulse_alert(self, ctx: commands.Context, channel: str = None):
+        """Set alert channel for downtime notifications."""
+        if channel is None:
+            await self.config.alert_channel.set(None)
+            await ctx.send("✅ Alert channel disabled.")
+            return
+
+        try:
+            channel_id = int(channel)
+            ch = ctx.guild.get_channel(channel_id) if ctx.guild else None
+            if not ch:
+                await ctx.send("Channel not found.", ephemeral=True)
+                return
+            await self.config.alert_channel.set(channel_id)
+            await ctx.send(f"✅ Alert channel set to {ch.mention}")
+        except ValueError:
+            await ctx.send("Invalid channel.", ephemeral=True)
 
     @shadypulse.command(name="autoreload")
     @app_commands.describe(enabled="Enable or disable cog auto-reload")

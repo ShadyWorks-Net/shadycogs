@@ -14,7 +14,7 @@ from redbot.core import commands, Config
 from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import pagify
 from discord import app_commands
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime, timedelta, timezone
 import asyncio
 import json
@@ -86,52 +86,86 @@ class SettingsModal(discord.ui.Modal, title="Tracker Settings"):
         )
 
 
-class ChannelSelect(discord.ui.Select):
-    """Select menu for choosing a channel from bot-visible channels."""
+class ChannelSearchModal(discord.ui.Modal, title="Set Channel"):
+    """Modal for searching and setting a channel by name."""
 
-    def __init__(self, cog: "SignupTracker", channels: List[discord.TextChannel], setting: str, current_id: Optional[int]):
+    channel_name = discord.ui.TextInput(
+        label="Channel Name (or ID)",
+        placeholder="Type channel name to search (leave empty to clear)",
+        required=False,
+        max_length=100,
+    )
+
+    def __init__(self, cog: "SignupTracker", setting: str):
+        super().__init__()
         self.cog = cog
         self.setting = setting  # "announcements" or "log"
+        self.title = f"Set {setting.title()} Channel"
 
-        options = [discord.SelectOption(label="None (Clear)", value="none", emoji="🚫")]
-        for ch in channels[:24]:  # Max 25 options
-            is_default = ch.id == current_id
-            options.append(discord.SelectOption(
-                label=f"#{ch.name}"[:100],
-                value=str(ch.id),
-                description=ch.category.name[:50] if ch.category else "No category",
-                default=is_default
-            ))
+    async def on_submit(self, interaction: discord.Interaction):
+        search = self.channel_name.value.strip()
 
-        super().__init__(
-            placeholder=f"Select {setting} channel...",
-            options=options,
-            min_values=1,
-            max_values=1
-        )
+        # Clear if empty
+        if not search:
+            if self.setting == "announcements":
+                await self.cog.config.guild(interaction.guild).announcements_channel.set(None)
+            else:
+                await self.cog.config.guild(interaction.guild).log_channel.set(None)
+            await interaction.response.send_message(f"✅ {self.setting.title()} channel cleared.", ephemeral=True)
+            return
 
-    async def callback(self, interaction: discord.Interaction):
-        value = self.values[0]
-        if value == "none":
-            channel_id = None
-            display = "None"
-        else:
-            channel_id = int(value)
-            display = f"<#{channel_id}>"
+        # Get bot-visible channels
+        bot_channels = [
+            ch for ch in interaction.guild.text_channels
+            if ch.permissions_for(interaction.guild.me).send_messages
+            and ch.permissions_for(interaction.guild.me).view_channel
+        ]
 
-        if self.setting == "announcements":
-            await self.cog.config.guild(interaction.guild).announcements_channel.set(channel_id)
-        else:
-            await self.cog.config.guild(interaction.guild).log_channel.set(channel_id)
+        # Try to match by ID first
+        if search.isdigit():
+            channel = interaction.guild.get_channel(int(search))
+            if channel and channel in bot_channels:
+                if self.setting == "announcements":
+                    await self.cog.config.guild(interaction.guild).announcements_channel.set(channel.id)
+                else:
+                    await self.cog.config.guild(interaction.guild).log_channel.set(channel.id)
+                await interaction.response.send_message(f"✅ {self.setting.title()} channel set to {channel.mention}", ephemeral=True)
+                return
+
+        # Search by name (case-insensitive, partial match)
+        search_lower = search.lower().lstrip('#')
+        matches = [ch for ch in bot_channels if search_lower in ch.name.lower()]
+
+        if not matches:
+            await interaction.response.send_message(
+                f"❌ No bot-accessible channels found matching `{search}`.\n"
+                f"Make sure the bot has access to the channel.",
+                ephemeral=True
+            )
+            return
+
+        if len(matches) == 1:
+            channel = matches[0]
+            if self.setting == "announcements":
+                await self.cog.config.guild(interaction.guild).announcements_channel.set(channel.id)
+            else:
+                await self.cog.config.guild(interaction.guild).log_channel.set(channel.id)
+            await interaction.response.send_message(f"✅ {self.setting.title()} channel set to {channel.mention}", ephemeral=True)
+            return
+
+        # Multiple matches - show list
+        match_list = "\n".join([f"• #{ch.name} ({ch.category.name if ch.category else 'No category'})" for ch in matches[:10]])
+        if len(matches) > 10:
+            match_list += f"\n... and {len(matches) - 10} more"
 
         await interaction.response.send_message(
-            f"✅ {self.setting.title()} channel set to {display}",
+            f"⚠️ Multiple channels match `{search}`:\n{match_list}\n\nPlease be more specific or use the channel ID.",
             ephemeral=True
         )
 
 
 class SetupView(discord.ui.View):
-    """Interactive setup view with channel selects and settings button."""
+    """Interactive setup view with channel search buttons and settings."""
 
     def __init__(self, cog: "SignupTracker", guild: discord.Guild, config: dict):
         super().__init__(timeout=300)
@@ -139,17 +173,13 @@ class SetupView(discord.ui.View):
         self.guild = guild
         self.config = config
 
-        # Get channels bot can see and send messages in
-        bot_channels = [
-            ch for ch in guild.text_channels
-            if ch.permissions_for(guild.me).send_messages
-            and ch.permissions_for(guild.me).view_channel
-        ]
-        bot_channels.sort(key=lambda c: (c.category.position if c.category else -1, c.position))
+    @discord.ui.button(label="Set Announcements Channel", style=discord.ButtonStyle.secondary, emoji="📢", row=0)
+    async def announcements_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ChannelSearchModal(self.cog, "announcements"))
 
-        # Add channel selects
-        self.add_item(ChannelSelect(cog, bot_channels, "announcements", config["announcements_channel"]))
-        self.add_item(ChannelSelect(cog, bot_channels, "log", config["log_channel"]))
+    @discord.ui.button(label="Set Log Channel", style=discord.ButtonStyle.secondary, emoji="📋", row=0)
+    async def log_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ChannelSearchModal(self.cog, "log"))
 
     @discord.ui.button(label="Edit Title & Deadline", style=discord.ButtonStyle.primary, emoji="⚙️", row=2)
     async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -179,6 +209,7 @@ class SignupTracker(commands.Cog):
     """Track reactions on announcement posts with persistent storage and history."""
 
     def __init__(self, bot: Red) -> None:
+        super().__init__()
         self.bot = bot
         self.config = Config.get_conf(self, identifier=CONFIG_IDENTIFIER, force_registration=True)
 
@@ -208,6 +239,28 @@ class SignupTracker(commands.Cog):
             return True
         mod_roles = await self.config.guild(ctx.guild).mod_roles()
         return any(role.id in mod_roles for role in ctx.author.roles)
+
+    async def bot_channel_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        """Autocomplete for channels the bot can see and send messages to."""
+        if not interaction.guild:
+            return []
+
+        choices = []
+        for channel in interaction.guild.text_channels:
+            perms = channel.permissions_for(interaction.guild.me)
+            if perms.view_channel and perms.send_messages:
+                # Match on channel name
+                if current.lower() in channel.name.lower():
+                    label = f"#{channel.name}"
+                    if channel.category:
+                        label = f"#{channel.name} ({channel.category.name})"
+                    choices.append(app_commands.Choice(name=label[:100], value=str(channel.id)))
+
+        # Sort by channel position and limit to 25
+        choices.sort(key=lambda c: int(c.value))
+        return choices[:25]
 
     async def cog_load(self) -> None:
         self.deadline_task = self.bot.loop.create_task(self._deadline_reminder_loop())
@@ -470,7 +523,7 @@ class SignupTracker(commands.Cog):
         embed.add_field(name="Default Deadline", value=deadline, inline=True)
 
         view = SetupView(self, ctx.guild, config)
-        await ctx.send(embed=embed, view=view)
+        await ctx.send(embed=embed, view=view, ephemeral=True)
 
     @signuptracker.command(name="status")
     async def signuptracker_status(self, ctx: commands.Context):
@@ -667,3 +720,45 @@ class SignupTracker(commands.Cog):
         )
         embed.set_footer(text="Admins and manage_guild permission can always manage signups")
         await ctx.send(embed=embed)
+
+    @signuptracker.command(name="announcements")
+    @app_commands.describe(channel="Channel where announcements are posted (bot-visible channels)")
+    @app_commands.autocomplete(channel=bot_channel_autocomplete)
+    async def signuptracker_announcements(self, ctx: commands.Context, channel: str = None):
+        """Set the announcements channel (where signup posts are made)."""
+        if channel is None:
+            await self.config.guild(ctx.guild).announcements_channel.set(None)
+            await ctx.send("✅ Announcements channel cleared.")
+            return
+
+        try:
+            channel_id = int(channel)
+            ch = ctx.guild.get_channel(channel_id)
+            if not ch:
+                await ctx.send("Channel not found.", ephemeral=True)
+                return
+            await self.config.guild(ctx.guild).announcements_channel.set(channel_id)
+            await ctx.send(f"✅ Announcements channel set to {ch.mention}")
+        except ValueError:
+            await ctx.send("Invalid channel.", ephemeral=True)
+
+    @signuptracker.command(name="logchannel")
+    @app_commands.describe(channel="Channel for signup tracker messages (bot-visible channels)")
+    @app_commands.autocomplete(channel=bot_channel_autocomplete)
+    async def signuptracker_logchannel(self, ctx: commands.Context, channel: str = None):
+        """Set the log channel (where tracker messages are posted)."""
+        if channel is None:
+            await self.config.guild(ctx.guild).log_channel.set(None)
+            await ctx.send("✅ Log channel cleared.")
+            return
+
+        try:
+            channel_id = int(channel)
+            ch = ctx.guild.get_channel(channel_id)
+            if not ch:
+                await ctx.send("Channel not found.", ephemeral=True)
+                return
+            await self.config.guild(ctx.guild).log_channel.set(channel_id)
+            await ctx.send(f"✅ Log channel set to {ch.mention}")
+        except ValueError:
+            await ctx.send("Invalid channel.", ephemeral=True)

@@ -212,26 +212,68 @@ class GameSelect(discord.ui.Select):
         )
 
 
-class ServerChannelSelect(discord.ui.Select):
-    """Select channel for new server."""
+class ServerChannelModal(discord.ui.Modal, title="Set Server Post Channel"):
+    """Modal for setting the post channel for a new server."""
 
-    def __init__(self, cog: "ShadyStatus", channels: List[discord.TextChannel]):
-        self.cog = cog
-        options = [discord.SelectOption(label="Same Channel (where command is run)", value="none", emoji="💬")]
-        for ch in channels[:24]:
-            options.append(discord.SelectOption(
-                label=f"#{ch.name}"[:100],
-                value=str(ch.id),
-                description=ch.category.name[:50] if ch.category else None
-            ))
-        super().__init__(placeholder="2️⃣ Select post channel...", options=options, row=1)
+    channel_name = discord.ui.TextInput(
+        label="Channel Name (or ID)",
+        placeholder="Leave empty for same channel, or type channel name",
+        required=False,
+        max_length=100,
+    )
 
-    async def callback(self, interaction: discord.Interaction):
-        value = self.values[0]
-        self.view.selected_channel = None if value == "none" else int(value)
-        channel_str = f"<#{self.view.selected_channel}>" if self.view.selected_channel else "same channel"
+    def __init__(self, view: "AddServerView"):
+        super().__init__()
+        self.parent_view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        search = self.channel_name.value.strip()
+
+        if not search:
+            self.parent_view.selected_channel = None
+            await interaction.response.send_message(
+                "Posts will go to **same channel** (where command is run). Click **Continue** to enter server details.",
+                ephemeral=True
+            )
+            return
+
+        # Get bot-visible channels
+        bot_channels = [
+            ch for ch in interaction.guild.text_channels
+            if ch.permissions_for(interaction.guild.me).send_messages
+            and ch.permissions_for(interaction.guild.me).view_channel
+        ]
+
+        # Try ID first
+        if search.isdigit():
+            channel = interaction.guild.get_channel(int(search))
+            if channel and channel in bot_channels:
+                self.parent_view.selected_channel = channel.id
+                await interaction.response.send_message(
+                    f"Posts will go to {channel.mention}. Click **Continue** to enter server details.",
+                    ephemeral=True
+                )
+                return
+
+        # Search by name
+        search_lower = search.lower().lstrip('#')
+        matches = [ch for ch in bot_channels if search_lower in ch.name.lower()]
+
+        if not matches:
+            await interaction.response.send_message(f"❌ No channels found matching `{search}`.", ephemeral=True)
+            return
+
+        if len(matches) == 1:
+            self.parent_view.selected_channel = matches[0].id
+            await interaction.response.send_message(
+                f"Posts will go to {matches[0].mention}. Click **Continue** to enter server details.",
+                ephemeral=True
+            )
+            return
+
+        match_list = "\n".join([f"• #{ch.name}" for ch in matches[:10]])
         await interaction.response.send_message(
-            f"Posts will go to {channel_str}. Click **Continue** to enter server details.",
+            f"⚠️ Multiple channels match `{search}`:\n{match_list}\n\nBe more specific or use the channel ID.",
             ephemeral=True
         )
 
@@ -248,11 +290,9 @@ class AddServerView(discord.ui.View):
         # Add game select
         self.add_item(GameSelect(cog))
 
-        # Add channel select
-        channels = [ch for ch in guild.text_channels
-                    if ch.permissions_for(guild.me).send_messages]
-        channels.sort(key=lambda c: (c.category.position if c.category else -1, c.position))
-        self.add_item(ServerChannelSelect(cog, channels))
+    @discord.ui.button(label="Set Post Channel", style=discord.ButtonStyle.secondary, emoji="📢", row=1)
+    async def channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ServerChannelModal(self))
 
     @discord.ui.button(label="Continue", style=discord.ButtonStyle.green, emoji="➡️", row=2)
     async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -289,26 +329,58 @@ class SettingsModal(discord.ui.Modal, title="ShadyStatus Settings"):
         await interaction.response.send_message(f"Rate limit set to **{rate}** seconds.", ephemeral=True)
 
 
-class ChannelSelect(discord.ui.Select):
-    """Select for post channel."""
+class DefaultChannelModal(discord.ui.Modal, title="Set Default Post Channel"):
+    """Modal for setting the default post channel."""
 
-    def __init__(self, cog: "ShadyStatus", channels: List[discord.TextChannel], current_id: Optional[int]):
+    channel_name = discord.ui.TextInput(
+        label="Channel Name (or ID)",
+        placeholder="Leave empty for same channel, or type channel name",
+        required=False,
+        max_length=100,
+    )
+
+    def __init__(self, cog: "ShadyStatus"):
+        super().__init__()
         self.cog = cog
-        options = [discord.SelectOption(label="Same Channel (default)", value="none", emoji="💬")]
-        for ch in channels[:24]:
-            options.append(discord.SelectOption(
-                label=f"#{ch.name}"[:100],
-                value=str(ch.id),
-                default=ch.id == current_id
-            ))
-        super().__init__(placeholder="Post results to...", options=options)
 
-    async def callback(self, interaction: discord.Interaction):
-        value = self.values[0]
-        channel_id = None if value == "none" else int(value)
-        await self.cog.config.guild(interaction.guild).post_channel.set(channel_id)
-        display = f"<#{channel_id}>" if channel_id else "Same channel"
-        await interaction.response.send_message(f"Results will post to {display}", ephemeral=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        search = self.channel_name.value.strip()
+
+        if not search:
+            await self.cog.config.guild(interaction.guild).post_channel.set(None)
+            await interaction.response.send_message("✅ Default post channel cleared (posts to same channel).", ephemeral=True)
+            return
+
+        bot_channels = [
+            ch for ch in interaction.guild.text_channels
+            if ch.permissions_for(interaction.guild.me).send_messages
+            and ch.permissions_for(interaction.guild.me).view_channel
+        ]
+
+        if search.isdigit():
+            channel = interaction.guild.get_channel(int(search))
+            if channel and channel in bot_channels:
+                await self.cog.config.guild(interaction.guild).post_channel.set(channel.id)
+                await interaction.response.send_message(f"✅ Default post channel set to {channel.mention}", ephemeral=True)
+                return
+
+        search_lower = search.lower().lstrip('#')
+        matches = [ch for ch in bot_channels if search_lower in ch.name.lower()]
+
+        if not matches:
+            await interaction.response.send_message(f"❌ No channels found matching `{search}`.", ephemeral=True)
+            return
+
+        if len(matches) == 1:
+            await self.cog.config.guild(interaction.guild).post_channel.set(matches[0].id)
+            await interaction.response.send_message(f"✅ Default post channel set to {matches[0].mention}", ephemeral=True)
+            return
+
+        match_list = "\n".join([f"• #{ch.name}" for ch in matches[:10]])
+        await interaction.response.send_message(
+            f"⚠️ Multiple channels match `{search}`:\n{match_list}\n\nBe more specific or use the channel ID.",
+            ephemeral=True
+        )
 
 
 class SetupView(discord.ui.View):
@@ -317,18 +389,30 @@ class SetupView(discord.ui.View):
     def __init__(self, cog: "ShadyStatus", guild: discord.Guild, config: dict):
         super().__init__(timeout=300)
         self.cog = cog
+        self.guild = guild
         self.config = config
 
-        channels = [ch for ch in guild.text_channels
-                    if ch.permissions_for(guild.me).send_messages]
-        channels.sort(key=lambda c: (c.category.position if c.category else -1, c.position))
+    @discord.ui.button(label="Set Default Channel", style=discord.ButtonStyle.secondary, emoji="📢", row=0)
+    async def channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DefaultChannelModal(self.cog))
 
-        self.add_item(ChannelSelect(cog, channels, config["post_channel"]))
-
-    @discord.ui.button(label="Rate Limit", style=discord.ButtonStyle.primary, emoji="⏱️", row=1)
+    @discord.ui.button(label="Set Rate Limit", style=discord.ButtonStyle.secondary, emoji="⏱️", row=0)
     async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         config = await self.cog.config.guild(interaction.guild).all()
         await interaction.response.send_modal(SettingsModal(self.cog, config["rate_limit_seconds"]))
+
+    @discord.ui.button(label="Add Server", style=discord.ButtonStyle.success, emoji="➕", row=1)
+    async def add_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="➕ Add Game Server",
+            description="1️⃣ Select a game type\n2️⃣ Set post channel (optional)\n3️⃣ Click Continue to enter details",
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=AddServerView(self.cog, interaction.guild),
+            ephemeral=True
+        )
 
 
 # ==================== MAIN COG ====================
@@ -361,6 +445,26 @@ class ShadyStatus(commands.Cog):
             return True
         mod_roles = await self.config.guild(ctx.guild).mod_roles()
         return any(role.id in mod_roles for role in ctx.author.roles)
+
+    async def bot_channel_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        """Autocomplete for channels the bot can see and send messages to."""
+        if not interaction.guild:
+            return []
+
+        choices = []
+        for channel in interaction.guild.text_channels:
+            perms = channel.permissions_for(interaction.guild.me)
+            if perms.view_channel and perms.send_messages:
+                if current.lower() in channel.name.lower():
+                    label = f"#{channel.name}"
+                    if channel.category:
+                        label = f"#{channel.name} ({channel.category.name})"
+                    choices.append(app_commands.Choice(name=label[:100], value=str(channel.id)))
+
+        choices.sort(key=lambda c: int(c.value))
+        return choices[:25]
 
     def _check_rate_limit(self, guild_id: int, user_id: int, server: str, rate: int) -> Optional[float]:
         if rate <= 0:
@@ -492,42 +596,34 @@ class ShadyStatus(commands.Cog):
     @shadystatus.command(name="setup")
     @app_commands.describe()
     async def shadystatus_setup(self, ctx: commands.Context):
-        """View configured servers and settings."""
+        """View and configure server status settings."""
         config = await self.config.guild(ctx.guild).all()
         servers = config.get("servers", {})
 
         embed = discord.Embed(title="🎮 ShadyStatus Setup", color=discord.Color.blue())
 
-        if not servers:
-            embed.description = "No servers configured.\n\nUse `/shadystatus add` to add a server."
-        else:
-            for name, cfg in list(servers.items())[:10]:
+        # Show global settings
+        default_channel = f"<#{config['post_channel']}>" if config.get("post_channel") else "Same channel"
+        embed.add_field(name="Default Channel", value=default_channel, inline=True)
+        embed.add_field(name="Default Rate Limit", value=f"{config.get('rate_limit_seconds', 300)}s", inline=True)
+        embed.add_field(name="Servers", value=str(len(servers)), inline=True)
+
+        if servers:
+            server_list = []
+            for name, cfg in list(servers.items())[:5]:
                 game = GAME_NAMES.get(GameType(cfg.get("game", "generic")), cfg.get("game", "?"))
                 status = "✅" if cfg.get("enabled", True) else "❌"
-                channel = f"<#{cfg['post_channel']}>" if cfg.get("post_channel") else "Same channel"
-                rate = cfg.get("rate_limit", config.get("rate_limit_seconds", 300))
+                server_list.append(f"{status} **{cfg.get('display_name', name)}** ({game})")
 
-                embed.add_field(
-                    name=f"{status} {cfg.get('display_name', name)}",
-                    value=f"**Game:** {game}\n**IP:** `{cfg['ip']}:{cfg['port']}`\n**Channel:** {channel}\n**Rate:** {rate}s",
-                    inline=True
-                )
+            if len(servers) > 5:
+                server_list.append(f"... and {len(servers) - 5} more")
 
-            if len(servers) > 10:
-                embed.set_footer(text=f"Showing 10 of {len(servers)} servers")
+            embed.add_field(name="Configured Servers", value="\n".join(server_list), inline=False)
+        else:
+            embed.add_field(name="Configured Servers", value="None - use buttons below to add", inline=False)
 
-        embed.add_field(
-            name="Commands",
-            value=(
-                "`/shadystatus add` - Add a server\n"
-                "`/shadystatus remove <name>` - Remove a server\n"
-                "`/shadystatus toggle <name>` - Enable/disable\n"
-                "`/shadystatus test <name>` - Test query"
-            ),
-            inline=False
-        )
-
-        await ctx.send(embed=embed)
+        view = SetupView(self, ctx.guild, config)
+        await ctx.send(embed=embed, view=view, ephemeral=True)
 
     @shadystatus.command(name="add")
     @app_commands.describe()
@@ -542,7 +638,7 @@ class ShadyStatus(commands.Cog):
             ),
             color=discord.Color.blue()
         )
-        await ctx.send(embed=embed, view=AddServerView(self, ctx.guild))
+        await ctx.send(embed=embed, view=AddServerView(self, ctx.guild), ephemeral=True)
 
     @shadystatus.command(name="remove")
     @app_commands.describe(name="Server ID to remove")
@@ -648,6 +744,27 @@ class ShadyStatus(commands.Cog):
         )
         embed.set_footer(text="Admins can always manage servers")
         await ctx.send(embed=embed)
+
+    @shadystatus.command(name="channel")
+    @app_commands.describe(channel="Default post channel (bot-visible channels)")
+    @app_commands.autocomplete(channel=bot_channel_autocomplete)
+    async def shadystatus_channel(self, ctx: commands.Context, channel: str = None):
+        """Set the default post channel for server status."""
+        if channel is None:
+            await self.config.guild(ctx.guild).post_channel.set(None)
+            await ctx.send("✅ Default post channel cleared (will post in same channel).")
+            return
+
+        try:
+            channel_id = int(channel)
+            ch = ctx.guild.get_channel(channel_id)
+            if not ch:
+                await ctx.send("Channel not found.", ephemeral=True)
+                return
+            await self.config.guild(ctx.guild).post_channel.set(channel_id)
+            await ctx.send(f"✅ Default post channel set to {ch.mention}")
+        except ValueError:
+            await ctx.send("Invalid channel.", ephemeral=True)
 
 
 async def setup(bot: Red):

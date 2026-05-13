@@ -169,6 +169,26 @@ class ShadyFlags(commands.Cog):
         mod_roles = await self.config.guild(interaction.guild).mod_roles()
         return any(role.id in mod_roles for role in interaction.user.roles)
 
+    async def bot_channel_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        """Autocomplete for channels the bot can see and send messages to."""
+        if not interaction.guild:
+            return []
+
+        choices = []
+        for channel in interaction.guild.text_channels:
+            perms = channel.permissions_for(interaction.guild.me)
+            if perms.view_channel and perms.send_messages:
+                if current.lower() in channel.name.lower():
+                    label = f"#{channel.name}"
+                    if channel.category:
+                        label = f"#{channel.name} ({channel.category.name})"
+                    choices.append(app_commands.Choice(name=label[:100], value=str(channel.id)))
+
+        choices.sort(key=lambda c: int(c.value))
+        return choices[:25]
+
     # ===== DATABASE METHODS =====
 
     async def add_flag(self, guild_id: int, user_id: int, moderator_id: int, reason: str, expiry_days: int, priority: str = "manual") -> int:
@@ -693,7 +713,11 @@ class ShadyFlags(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="flagset", description="Configure flag settings")
-    @app_commands.describe(setting="Setting to configure", role="Role for add/remove role actions")
+    @app_commands.describe(
+        setting="Setting to configure",
+        role="Role for add/remove role actions",
+        channel="Channel for log channel setting (bot-visible channels)"
+    )
     @app_commands.choices(setting=[
         app_commands.Choice(name="View Settings", value="view"),
         app_commands.Choice(name="Set Log Channel", value="channel"),
@@ -703,11 +727,13 @@ class ShadyFlags(commands.Cog):
         app_commands.Choice(name="Add Mod Role", value="addrole"),
         app_commands.Choice(name="Remove Mod Role", value="removerole"),
     ])
+    @app_commands.autocomplete(channel=bot_channel_autocomplete)
     async def flagset_cmd(
         self,
         interaction: discord.Interaction,
         setting: str,
-        role: Optional[discord.Role] = None
+        role: Optional[discord.Role] = None,
+        channel: Optional[str] = None
     ):
         """Configure flag settings."""
         # For role management, require admin
@@ -760,8 +786,21 @@ class ShadyFlags(commands.Cog):
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
         elif setting == "channel":
-            view = ChannelSelectView(self)
-            await interaction.response.send_message("Select the mod log channel:", view=view, ephemeral=True)
+            if channel is None:
+                await self.config.guild(interaction.guild).mod_log_channel.set(None)
+                await interaction.response.send_message("✅ Mod log channel cleared.", ephemeral=True)
+                return
+
+            try:
+                channel_id = int(channel)
+                ch = interaction.guild.get_channel(channel_id)
+                if not ch:
+                    await interaction.response.send_message("Channel not found.", ephemeral=True)
+                    return
+                await self.config.guild(interaction.guild).mod_log_channel.set(channel_id)
+                await interaction.response.send_message(f"✅ Mod log channel set to {ch.mention}", ephemeral=True)
+            except ValueError:
+                await interaction.response.send_message("Invalid channel.", ephemeral=True)
 
         elif setting == "autoflag":
             current = await self.config.guild(interaction.guild).auto_flag_enabled()
@@ -932,25 +971,6 @@ class AddFlagMemberModal(discord.ui.Modal, title="Add Flag"):
             interaction.guild,
             f"🚩 **Flag Added** by {interaction.user.mention}\n**User:** {self.member.mention}\n**Reason:** {self.reason.value}"
         )
-
-
-class ChannelSelectView(discord.ui.View):
-    """View for selecting mod log channel."""
-
-    def __init__(self, cog: ShadyFlags):
-        super().__init__(timeout=120)
-        self.cog = cog
-
-    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="Select channel...", min_values=0, max_values=1)
-    async def channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
-        if select.values:
-            channel = select.values[0]
-            await self.cog.config.guild(interaction.guild).mod_log_channel.set(channel.id)
-            await interaction.response.send_message(f"✅ Mod log channel set to {channel.mention}", ephemeral=True)
-        else:
-            await self.cog.config.guild(interaction.guild).mod_log_channel.set(None)
-            await interaction.response.send_message("✅ Mod log channel cleared.", ephemeral=True)
-        self.stop()
 
 
 class ThresholdModal(discord.ui.Modal, title="Set Auto-Flag Thresholds"):
