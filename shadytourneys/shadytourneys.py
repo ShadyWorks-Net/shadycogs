@@ -79,6 +79,30 @@ class ShadyTourneys(commands.Cog):
             "mod_roles": [],  # Roles that can manage tournaments
             "default_format": "single_elimination",
             "player_stats": {},  # Per-game stats: {game: {user_id_str: stats}}
+            "supported_games": ["rivals"],  # Games that appear in autocomplete
+            "seed_lists": {
+                "rivals": {
+                    "One Above All": 1500,
+                    "Eternity": 1400,
+                    "Celestial": 1300,
+                    "Grandmaster": 1200,
+                    "Diamond": 1100,
+                    "Platinum": 1050,
+                    "Gold": 1000,
+                    "Silver": 950,
+                    "Bronze": 900,
+                }
+            },
+        }
+
+        # Default generic seed list (used when game has no custom list)
+        self.default_seed_list = {
+            "S Tier": 1400,
+            "A Tier": 1250,
+            "B Tier": 1100,
+            "C Tier": 1000,
+            "D Tier": 900,
+            "Unranked": 850,
         }
 
         # Player stats structure:
@@ -1115,18 +1139,27 @@ class ShadyTourneys(commands.Cog):
     # ==================== GUILD ADMIN COMMANDS ====================
 
     @app_commands.command(name="tourneyset", description="Configure tournament settings")
-    @app_commands.describe(setting="Setting to configure", role="Role for add/remove role actions")
+    @app_commands.describe(
+        setting="Setting to configure",
+        role="Role for add/remove role actions",
+        game="Game name for game-related actions"
+    )
     @app_commands.choices(setting=[
         app_commands.Choice(name="View Settings", value="view"),
         app_commands.Choice(name="Add Mod Role", value="addrole"),
         app_commands.Choice(name="Remove Mod Role", value="removerole"),
         app_commands.Choice(name="Set Default Format", value="format"),
+        app_commands.Choice(name="Add Game", value="addgame"),
+        app_commands.Choice(name="Remove Game", value="removegame"),
+        app_commands.Choice(name="List Games", value="listgames"),
+        app_commands.Choice(name="Configure Seed List", value="seedlist"),
     ])
     async def tourneyset(
         self,
         interaction: discord.Interaction,
         setting: str,
-        role: Optional[discord.Role] = None
+        role: Optional[discord.Role] = None,
+        game: Optional[str] = None
     ):
         """Configure tournament settings."""
         # Bot owner always authorized
@@ -1180,6 +1213,14 @@ class ShadyTourneys(commands.Cog):
                 inline=True
             )
 
+            # Show supported games
+            supported_games = config.get("supported_games", ["rivals"])
+            embed.add_field(
+                name="Supported Games",
+                value=", ".join(g.title() for g in supported_games) if supported_games else "None",
+                inline=False
+            )
+
             embed.set_footer(text=f"v{self.__version__}")
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1217,6 +1258,119 @@ class ShadyTourneys(commands.Cog):
                 view=view,
                 ephemeral=True
             )
+
+        elif setting == "addgame":
+            if not game:
+                await interaction.response.send_message(
+                    "Please specify a game name. Example: `/tourneyset setting:Add Game game:valorant`",
+                    ephemeral=True
+                )
+                return
+
+            game_lower = game.lower().strip()
+            async with self.config.guild(interaction.guild).supported_games() as games:
+                if game_lower in games:
+                    await interaction.response.send_message(
+                        f"❌ **{game.title()}** is already in the supported games list.",
+                        ephemeral=True
+                    )
+                    return
+                games.append(game_lower)
+
+            await interaction.response.send_message(
+                f"✅ Added **{game.title()}** to supported games.\n"
+                f"It will now appear in game autocomplete dropdowns.",
+                ephemeral=True
+            )
+
+        elif setting == "removegame":
+            if not game:
+                await interaction.response.send_message(
+                    "Please specify a game name to remove.",
+                    ephemeral=True
+                )
+                return
+
+            game_lower = game.lower().strip()
+            async with self.config.guild(interaction.guild).supported_games() as games:
+                if game_lower not in games:
+                    await interaction.response.send_message(
+                        f"❌ **{game.title()}** is not in the supported games list.",
+                        ephemeral=True
+                    )
+                    return
+                games.remove(game_lower)
+
+            await interaction.response.send_message(
+                f"✅ Removed **{game.title()}** from supported games.\n"
+                f"Note: Existing player stats for this game are preserved.",
+                ephemeral=True
+            )
+
+        elif setting == "listgames":
+            supported_games = await self.config.guild(interaction.guild).supported_games()
+            player_stats = await self.config.guild(interaction.guild).player_stats()
+            seed_lists = await self.config.guild(interaction.guild).seed_lists()
+
+            embed = discord.Embed(
+                title="🎮 Tournament Games",
+                color=discord.Color.blue()
+            )
+
+            if supported_games:
+                game_list = []
+                for g in supported_games:
+                    has_seeds = "✅" if g in seed_lists else "⚪"
+                    game_list.append(f"{has_seeds} {g.title()}")
+                embed.add_field(
+                    name="Supported Games (✅ = has seed list)",
+                    value="\n".join(game_list),
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="Supported Games",
+                    value="None configured",
+                    inline=False
+                )
+
+            # Show games with existing stats
+            games_with_stats = [g for g in player_stats.keys() if g not in supported_games]
+            if games_with_stats:
+                embed.add_field(
+                    name="Games with Stats (not in list)",
+                    value="\n".join(f"• {g.title()}" for g in games_with_stats),
+                    inline=False
+                )
+
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        elif setting == "seedlist":
+            if not game:
+                await interaction.response.send_message(
+                    "Please specify a game. Example: `/tourneyset setting:Configure Seed List game:valorant`",
+                    ephemeral=True
+                )
+                return
+
+            game_lower = game.lower().strip()
+
+            # Check if game is in supported list
+            supported_games = await self.config.guild(interaction.guild).supported_games()
+            if game_lower not in supported_games:
+                await interaction.response.send_message(
+                    f"⚠️ **{game.title()}** is not in supported games.\n"
+                    f"Add it first with `/tourneyset setting:Add Game game:{game}`",
+                    ephemeral=True
+                )
+                return
+
+            # Get current seed list for this game
+            seed_lists = await self.config.guild(interaction.guild).seed_lists()
+            current_list = seed_lists.get(game_lower, {})
+
+            modal = SeedListModal(self, game_lower, current_list)
+            await interaction.response.send_modal(modal)
 
     @app_commands.command(name="tourneystats", description="View player ELO statistics (Admin only)")
     @app_commands.describe(
@@ -1337,11 +1491,11 @@ class ShadyTourneys(commands.Cog):
     ) -> List[app_commands.Choice[str]]:
         """Autocomplete for game names in stats."""
         player_stats = await self.config.guild(interaction.guild).player_stats()
-        games = list(player_stats.keys())
+        supported_games = await self.config.guild(interaction.guild).supported_games()
 
-        # Always include "rivals" as an option
-        if "rivals" not in games:
-            games.insert(0, "rivals")
+        # Combine supported games + games with existing stats
+        games = list(set(supported_games + list(player_stats.keys())))
+        games.sort()
 
         if not current:
             return [app_commands.Choice(name=g.title(), value=g) for g in games[:25]]
@@ -1349,46 +1503,9 @@ class ShadyTourneys(commands.Cog):
         filtered = [g for g in games if current.lower() in g.lower()]
         return [app_commands.Choice(name=g.title(), value=g) for g in filtered[:25]]
 
-    # Marvel Rivals rank to ELO mapping
-    RIVALS_RANK_ELO = {
-        "one_above_all": 1500,
-        "eternity": 1400,
-        "celestial": 1300,
-        "grandmaster": 1200,
-        "diamond": 1100,
-        "platinum": 1050,
-        "gold": 1000,
-        "silver": 950,
-        "bronze": 900,
-        "unranked": 1000,
-    }
-
-    @app_commands.command(name="tourneyseed", description="Set initial seed/ELO for a player based on their Marvel Rivals rank")
-    @app_commands.describe(
-        player="Player to seed",
-        rank="Player's Marvel Rivals rank",
-        game="Game (default: rivals)"
-    )
-    @app_commands.choices(rank=[
-        app_commands.Choice(name="One Above All (Top 500)", value="one_above_all"),
-        app_commands.Choice(name="Eternity", value="eternity"),
-        app_commands.Choice(name="Celestial", value="celestial"),
-        app_commands.Choice(name="Grandmaster", value="grandmaster"),
-        app_commands.Choice(name="Diamond", value="diamond"),
-        app_commands.Choice(name="Platinum", value="platinum"),
-        app_commands.Choice(name="Gold", value="gold"),
-        app_commands.Choice(name="Silver", value="silver"),
-        app_commands.Choice(name="Bronze", value="bronze"),
-        app_commands.Choice(name="Unranked", value="unranked"),
-    ])
-    async def tourneyseed(
-        self,
-        interaction: discord.Interaction,
-        player: discord.Member,
-        rank: app_commands.Choice[str],
-        game: str = "rivals"
-    ):
-        """Set initial seed for a player based on their Marvel Rivals rank."""
+    @app_commands.command(name="tourneyseed", description="Seed players with initial ELO based on rank")
+    async def tourneyseed(self, interaction: discord.Interaction):
+        """Open the seeding interface to set initial ELO for players."""
         if not interaction.user.guild_permissions.administrator:
             if not await self.is_authorized(interaction):
                 await interaction.response.send_message(
@@ -1397,45 +1514,26 @@ class ShadyTourneys(commands.Cog):
                 )
                 return
 
-        game_lower = game.lower()
-        user_id_str = str(player.id)
+        supported_games = await self.config.guild(interaction.guild).supported_games()
+        seed_lists = await self.config.guild(interaction.guild).seed_lists()
 
-        # Get starting ELO based on Marvel Rivals rank
-        starting_elo = self.RIVALS_RANK_ELO.get(rank.value, 1000)
+        if not supported_games:
+            await interaction.response.send_message(
+                "❌ No games configured.\n\n"
+                "Add games first with `/tourneyset setting:Add Game game:<name>`\n"
+                "Then configure ranks with `/tourneyset setting:Configure Seed List game:<name>`",
+                ephemeral=True
+            )
+            return
 
-        async with self.config.guild(interaction.guild).player_stats() as player_stats:
-            if game_lower not in player_stats:
-                player_stats[game_lower] = {}
-
-            if user_id_str in player_stats[game_lower]:
-                existing = player_stats[game_lower][user_id_str]
-                if existing.get("matches_played", 0) > 0:
-                    await interaction.response.send_message(
-                        f"⚠️ {player.mention} already has match history in **{game}**.\n"
-                        f"Current ELO: **{existing.get('elo', 1000)}** ({existing.get('matches_played', 0)} matches)\n\n"
-                        f"Initial seeding only works for players with no match history.\n"
-                        f"Their ELO will continue to adjust from match results.",
-                        ephemeral=True
-                    )
-                    return
-
-            # Set initial stats with seeded ELO
-            player_stats[game_lower][user_id_str] = {
-                "elo": starting_elo,
-                "wins": 0,
-                "losses": 0,
-                "matches_played": 0,
-                "tournaments_won": 0,
-                "initial_rank": rank.value,
-                "seeded_at": datetime.now(timezone.utc).isoformat(),
-                "seeded_by": interaction.user.id,
-            }
-
+        view = SeedingView(self, supported_games, seed_lists)
         await interaction.response.send_message(
-            f"✅ **{player.display_name}** seeded for **{game.title()}**\n\n"
-            f"**Rank:** {rank.name}\n"
-            f"**Starting ELO:** {starting_elo}\n\n"
-            f"Their ELO will adjust naturally from match results.",
+            "**🎯 Player Seeding**\n\n"
+            "1️⃣ Select a game\n"
+            "2️⃣ Select a rank\n"
+            "3️⃣ Select player(s) to seed\n"
+            "4️⃣ Confirm",
+            view=view,
             ephemeral=True
         )
 
@@ -2208,6 +2306,237 @@ class ShadyTourneys(commands.Cog):
 
 
 # ==================== UI VIEWS AND MODALS ====================
+
+
+class SeedListModal(discord.ui.Modal, title="Configure Seed List"):
+    """Modal for configuring rank-to-ELO mappings for a game."""
+
+    ranks = discord.ui.TextInput(
+        label="Ranks (one per line, highest first)",
+        placeholder="Radiant\nImmortal\nAscendant\nDiamond\nPlatinum\nGold",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500,
+    )
+
+    elos = discord.ui.TextInput(
+        label="ELO values (one per line, matching ranks)",
+        placeholder="1500\n1400\n1300\n1200\n1100\n1000",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=200,
+    )
+
+    def __init__(self, cog: "ShadyTourneys", game: str, current_list: dict):
+        super().__init__()
+        self.cog = cog
+        self.game = game
+
+        # Pre-fill with current values if exists
+        if current_list:
+            self.ranks.default = "\n".join(current_list.keys())
+            self.elos.default = "\n".join(str(v) for v in current_list.values())
+
+    async def on_submit(self, interaction: discord.Interaction):
+        rank_lines = [r.strip() for r in self.ranks.value.strip().split("\n") if r.strip()]
+        elo_lines = [e.strip() for e in self.elos.value.strip().split("\n") if e.strip()]
+
+        if len(rank_lines) != len(elo_lines):
+            await interaction.response.send_message(
+                f"❌ Mismatch: {len(rank_lines)} ranks but {len(elo_lines)} ELO values.\n"
+                f"Each rank needs a corresponding ELO value.",
+                ephemeral=True
+            )
+            return
+
+        # Parse ELO values
+        seed_list = {}
+        for rank, elo_str in zip(rank_lines, elo_lines):
+            try:
+                elo = int(elo_str)
+                if elo < 0 or elo > 5000:
+                    await interaction.response.send_message(
+                        f"❌ Invalid ELO for **{rank}**: {elo_str}\nELO must be between 0-5000.",
+                        ephemeral=True
+                    )
+                    return
+                seed_list[rank] = elo
+            except ValueError:
+                await interaction.response.send_message(
+                    f"❌ Invalid ELO value for **{rank}**: `{elo_str}`\nMust be a number.",
+                    ephemeral=True
+                )
+                return
+
+        # Save the seed list
+        async with self.cog.config.guild(interaction.guild).seed_lists() as seed_lists:
+            seed_lists[self.game] = seed_list
+
+        # Format for display
+        display = "\n".join(f"• **{rank}**: {elo}" for rank, elo in seed_list.items())
+
+        await interaction.response.send_message(
+            f"✅ Seed list configured for **{self.game.title()}**:\n\n{display}",
+            ephemeral=True
+        )
+
+
+class SeedingView(discord.ui.View):
+    """View for seeding players with game and rank selection."""
+
+    def __init__(self, cog: "ShadyTourneys", supported_games: list, seed_lists: dict):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.seed_lists = seed_lists
+        self.selected_game = None
+        self.selected_rank = None
+        self.selected_elo = None
+        self.selected_players = []
+
+        # Add game select
+        game_options = [
+            discord.SelectOption(label=g.title(), value=g)
+            for g in supported_games[:25]
+        ]
+        if game_options:
+            self.game_select = discord.ui.Select(
+                placeholder="1️⃣ Select game...",
+                options=game_options,
+                row=0
+            )
+            self.game_select.callback = self.game_callback
+            self.add_item(self.game_select)
+
+    async def game_callback(self, interaction: discord.Interaction):
+        self.selected_game = self.game_select.values[0]
+
+        # Get seed list for this game (or default)
+        if self.selected_game in self.seed_lists:
+            seed_list = self.seed_lists[self.selected_game]
+        else:
+            seed_list = self.cog.default_seed_list
+
+        # Update or add rank select
+        rank_options = [
+            discord.SelectOption(label=f"{rank} ({elo} ELO)", value=rank)
+            for rank, elo in seed_list.items()
+        ]
+
+        # Remove old rank select if exists
+        for item in self.children[:]:
+            if isinstance(item, discord.ui.Select) and item.placeholder and "rank" in item.placeholder.lower():
+                self.remove_item(item)
+
+        self.rank_select = discord.ui.Select(
+            placeholder="2️⃣ Select rank...",
+            options=rank_options[:25],
+            row=1
+        )
+        self.rank_select.callback = self.rank_callback
+        self.add_item(self.rank_select)
+
+        await interaction.response.edit_message(
+            content=f"**Game:** {self.selected_game.title()}\n\nNow select a rank:",
+            view=self
+        )
+
+    async def rank_callback(self, interaction: discord.Interaction):
+        self.selected_rank = self.rank_select.values[0]
+
+        # Get ELO for selected rank
+        if self.selected_game in self.seed_lists:
+            self.selected_elo = self.seed_lists[self.selected_game].get(self.selected_rank, 1000)
+        else:
+            self.selected_elo = self.cog.default_seed_list.get(self.selected_rank, 1000)
+
+        # Remove old player select if exists
+        for item in self.children[:]:
+            if isinstance(item, discord.ui.UserSelect):
+                self.remove_item(item)
+
+        self.player_select = discord.ui.UserSelect(
+            placeholder="3️⃣ Select players to seed...",
+            min_values=1,
+            max_values=10,
+            row=2
+        )
+        self.player_select.callback = self.player_callback
+        self.add_item(self.player_select)
+
+        await interaction.response.edit_message(
+            content=f"**Game:** {self.selected_game.title()}\n**Rank:** {self.selected_rank} ({self.selected_elo} ELO)\n\nSelect players to seed:",
+            view=self
+        )
+
+    async def player_callback(self, interaction: discord.Interaction):
+        self.selected_players = self.player_select.values
+
+        # Show confirmation with submit button
+        player_mentions = ", ".join(p.mention for p in self.selected_players)
+
+        # Remove old submit button if exists
+        for item in self.children[:]:
+            if isinstance(item, discord.ui.Button) and item.label == "Seed Players":
+                self.remove_item(item)
+
+        self.submit_button = discord.ui.Button(
+            label="Seed Players",
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            row=3
+        )
+        self.submit_button.callback = self.submit_callback
+        self.add_item(self.submit_button)
+
+        await interaction.response.edit_message(
+            content=f"**Game:** {self.selected_game.title()}\n**Rank:** {self.selected_rank} ({self.selected_elo} ELO)\n**Players:** {player_mentions}\n\nClick **Seed Players** to confirm.",
+            view=self
+        )
+
+    async def submit_callback(self, interaction: discord.Interaction):
+        if not self.selected_game or not self.selected_rank or not self.selected_players:
+            await interaction.response.send_message("Please complete all selections.", ephemeral=True)
+            return
+
+        game_lower = self.selected_game.lower()
+        seeded = []
+        skipped = []
+
+        async with self.cog.config.guild(interaction.guild).player_stats() as player_stats:
+            if game_lower not in player_stats:
+                player_stats[game_lower] = {}
+
+            for player in self.selected_players:
+                user_id_str = str(player.id)
+
+                # Check if player already has match history
+                if user_id_str in player_stats[game_lower]:
+                    existing = player_stats[game_lower][user_id_str]
+                    if existing.get("matches_played", 0) > 0:
+                        skipped.append(f"{player.display_name} (has {existing.get('matches_played', 0)} matches)")
+                        continue
+
+                # Set initial stats
+                player_stats[game_lower][user_id_str] = {
+                    "elo": self.selected_elo,
+                    "wins": 0,
+                    "losses": 0,
+                    "matches_played": 0,
+                    "seeded_rank": self.selected_rank,
+                }
+                seeded.append(player.display_name)
+
+        response = f"✅ **Seeding Complete for {self.selected_game.title()}**\n\n"
+        response += f"**Rank:** {self.selected_rank} ({self.selected_elo} ELO)\n\n"
+
+        if seeded:
+            response += f"**Seeded ({len(seeded)}):** {', '.join(seeded)}\n"
+        if skipped:
+            response += f"\n⚠️ **Skipped (have match history):** {', '.join(skipped)}"
+
+        await interaction.response.edit_message(content=response, view=None)
+        self.stop()
+
 
 class TournamentCreateModal(discord.ui.Modal, title="Create Tournament"):
     """Modal for creating a new tournament."""
