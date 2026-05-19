@@ -819,26 +819,51 @@ class ShadyTourneys(commands.Cog):
     def _generate_single_elimination(
         self, entities: List, round_deadline_hours: int = 48
     ) -> List[Dict[str, Any]]:
-        """Generate single elimination bracket."""
+        """Generate single elimination bracket with all rounds.
+
+        Creates the full bracket structure upfront with TBD placeholders
+        for future rounds. This allows for proper bracket advancement.
+        """
+        import math
+
         matches = []
         match_id = 1
+        n = len(entities)
+
+        if n < 2:
+            return matches
+
+        # Calculate number of rounds needed
+        num_rounds = math.ceil(math.log2(n))
+
+        # Pad to power of 2 for cleaner bracket (with BYEs)
+        bracket_size = 2 ** num_rounds
+
         round_deadline = datetime.now(timezone.utc) + timedelta(hours=round_deadline_hours)
 
-        for i in range(0, len(entities) - 1, 2):
-            seed1 = i + 1  # 1-indexed seeds
-            seed2 = i + 2
-            matches.append({
+        # First round - pair up entities with proper seeding
+        r1_matches = []
+        for i in range(bracket_size // 2):
+            p1 = entities[i] if i < len(entities) else "BYE"
+            p2_idx = bracket_size - 1 - i
+            p2 = entities[p2_idx] if p2_idx < len(entities) else "BYE"
+
+            # Handle BYE matches
+            is_bye = p1 == "BYE" or p2 == "BYE"
+            winner = p1 if p2 == "BYE" else (p2 if p1 == "BYE" else None)
+
+            match = {
                 "id": match_id,
                 "round": 1,
                 "bracket_type": "winners",
-                "participant1": entities[i],
-                "participant2": entities[i + 1],
-                "seed1": seed1,
-                "seed2": seed2,
-                "winner": None,
-                "score": None,
-                "completed": False,
-                # Scheduling fields
+                "participant1": p1,
+                "participant2": p2,
+                "seed1": i + 1 if p1 != "BYE" else None,
+                "seed2": p2_idx + 1 if p2 != "BYE" else None,
+                "winner": winner,
+                "loser": None,
+                "score": "BYE" if is_bye else None,
+                "completed": is_bye,
                 "deadline": round_deadline.isoformat(),
                 "proposed_time": None,
                 "proposed_by": None,
@@ -848,44 +873,469 @@ class ShadyTourneys(commands.Cog):
                 "checked_in": [],
                 "forfeit": False,
                 "forfeit_reason": None,
-            })
+                "next_winner_match": None,  # Will be set below
+            }
+            matches.append(match)
+            r1_matches.append(match_id)
             match_id += 1
 
-        # Handle odd number of participants (BYE)
-        if len(entities) % 2 != 0:
-            matches.append({
-                "id": match_id,
-                "round": 1,
-                "bracket_type": "winners",
-                "participant1": entities[-1],
-                "participant2": "BYE",
-                "seed1": len(entities),
-                "seed2": None,
-                "winner": entities[-1],
-                "score": "BYE",
-                "completed": True,
-                "deadline": round_deadline.isoformat(),
-                "proposed_time": None,
-                "proposed_by": None,
-                "scheduled_time": None,
-                "scheduling_thread": None,
-                "reminder_sent": False,
-                "checked_in": [],
-                "forfeit": False,
-                "forfeit_reason": None,
-            })
+        # Create remaining rounds with TBD participants
+        matches_by_round = {1: r1_matches}
+        current_round_matches = r1_matches
+
+        for round_num in range(2, num_rounds + 1):
+            round_deadline = datetime.now(timezone.utc) + timedelta(
+                hours=round_deadline_hours * round_num
+            )
+            next_round_matches = []
+
+            for i in range(0, len(current_round_matches), 2):
+                source = []
+                if i < len(current_round_matches):
+                    source.append(current_round_matches[i])
+                if i + 1 < len(current_round_matches):
+                    source.append(current_round_matches[i + 1])
+
+                match = {
+                    "id": match_id,
+                    "round": round_num,
+                    "bracket_type": "winners",
+                    "participant1": "TBD",
+                    "participant2": "TBD",
+                    "seed1": None,
+                    "seed2": None,
+                    "winner": None,
+                    "loser": None,
+                    "score": None,
+                    "completed": False,
+                    "deadline": round_deadline.isoformat(),
+                    "proposed_time": None,
+                    "proposed_by": None,
+                    "scheduled_time": None,
+                    "scheduling_thread": None,
+                    "reminder_sent": False,
+                    "checked_in": [],
+                    "forfeit": False,
+                    "forfeit_reason": None,
+                    "next_winner_match": None,
+                    "source_matches": source,
+                }
+                matches.append(match)
+                next_round_matches.append(match_id)
+
+                # Link previous round matches to this one
+                for prev_match_id in source:
+                    for m in matches:
+                        if m["id"] == prev_match_id:
+                            m["next_winner_match"] = match_id
+                            break
+
+                match_id += 1
+
+            matches_by_round[round_num] = next_round_matches
+            current_round_matches = next_round_matches
 
         return matches
 
     def _generate_double_elimination(
         self, entities: List, round_deadline_hours: int = 48
     ) -> List[Dict[str, Any]]:
-        """Generate double elimination bracket (winners + losers bracket)."""
-        # Start with winners bracket (same as single elimination first round)
-        matches = self._generate_single_elimination(entities, round_deadline_hours)
+        """Generate double elimination bracket (winners + losers bracket).
 
-        # Mark as winners bracket (already done in single elim)
-        # Losers bracket will be generated as matches complete
+        Double elimination structure:
+        - Winners bracket: Standard single elimination
+        - Losers bracket: Losers drop down, play until one remains
+        - Grand finals: Winners bracket champ vs Losers bracket champ
+        - Bracket reset: If losers champ wins grand finals, play one more match
+
+        We generate the full structure upfront with TBD placeholders.
+        """
+        matches = []
+        match_id = 1
+        n = len(entities)
+
+        if n < 2:
+            return matches
+
+        # Calculate number of rounds needed
+        import math
+        winners_rounds = math.ceil(math.log2(n))
+
+        # Pad to power of 2 for cleaner bracket (with BYEs)
+        bracket_size = 2 ** winners_rounds
+
+        # ==================== WINNERS BRACKET ====================
+        round_deadline = datetime.now(timezone.utc) + timedelta(hours=round_deadline_hours)
+
+        # First round - pair up entities
+        winners_r1_matches = []
+        for i in range(bracket_size // 2):
+            p1 = entities[i] if i < len(entities) else "BYE"
+            p2_idx = bracket_size - 1 - i
+            p2 = entities[p2_idx] if p2_idx < len(entities) else "BYE"
+
+            # Handle BYE matches
+            is_bye = p1 == "BYE" or p2 == "BYE"
+            winner = p1 if p2 == "BYE" else (p2 if p1 == "BYE" else None)
+
+            match = {
+                "id": match_id,
+                "round": 1,
+                "bracket_type": "winners",
+                "winners_round": 1,
+                "participant1": p1,
+                "participant2": p2,
+                "seed1": i + 1 if p1 != "BYE" else None,
+                "seed2": p2_idx + 1 if p2 != "BYE" else None,
+                "winner": winner,
+                "loser": None,
+                "score": "BYE" if is_bye else None,
+                "completed": is_bye,
+                "deadline": round_deadline.isoformat(),
+                "proposed_time": None,
+                "proposed_by": None,
+                "scheduled_time": None,
+                "scheduling_thread": None,
+                "reminder_sent": False,
+                "checked_in": [],
+                "forfeit": False,
+                "forfeit_reason": None,
+                "next_winner_match": None,  # Will be set after all matches created
+                "next_loser_match": None,   # For double elim - where loser goes
+            }
+            matches.append(match)
+            winners_r1_matches.append(match_id)
+            match_id += 1
+
+        # Create remaining winners bracket rounds (with TBD participants)
+        winners_matches_by_round = {1: winners_r1_matches}
+        current_round_matches = winners_r1_matches
+
+        for round_num in range(2, winners_rounds + 1):
+            round_deadline = datetime.now(timezone.utc) + timedelta(
+                hours=round_deadline_hours * round_num
+            )
+            next_round_matches = []
+
+            for i in range(0, len(current_round_matches), 2):
+                match = {
+                    "id": match_id,
+                    "round": round_num,
+                    "bracket_type": "winners",
+                    "winners_round": round_num,
+                    "participant1": "TBD",
+                    "participant2": "TBD",
+                    "seed1": None,
+                    "seed2": None,
+                    "winner": None,
+                    "loser": None,
+                    "score": None,
+                    "completed": False,
+                    "deadline": round_deadline.isoformat(),
+                    "proposed_time": None,
+                    "proposed_by": None,
+                    "scheduled_time": None,
+                    "scheduling_thread": None,
+                    "reminder_sent": False,
+                    "checked_in": [],
+                    "forfeit": False,
+                    "forfeit_reason": None,
+                    "next_winner_match": None,
+                    "next_loser_match": None,
+                    "source_matches": [current_round_matches[i], current_round_matches[i + 1]] if i + 1 < len(current_round_matches) else [current_round_matches[i]],
+                }
+                matches.append(match)
+                next_round_matches.append(match_id)
+
+                # Link previous round matches to this one
+                for prev_match_id in match.get("source_matches", []):
+                    for m in matches:
+                        if m["id"] == prev_match_id:
+                            m["next_winner_match"] = match_id
+                            break
+
+                match_id += 1
+
+            winners_matches_by_round[round_num] = next_round_matches
+            current_round_matches = next_round_matches
+
+        # ==================== LOSERS BRACKET ====================
+        # Losers bracket has (2 * winners_rounds - 2) rounds
+        # - Odd rounds: losers from winners bracket drop in
+        # - Even rounds: losers bracket survivors play each other
+
+        losers_rounds = (winners_rounds - 1) * 2 if winners_rounds > 1 else 0
+        losers_matches_by_round = {}
+
+        if losers_rounds > 0:
+            # Track which winners round feeds into which losers round
+            # Winners R1 losers -> Losers R1
+            # Winners R2 losers -> Losers R2 (play vs Losers R1 winners)
+            # etc.
+
+            prev_losers_winners = []  # Winners from previous losers round
+
+            for losers_round in range(1, losers_rounds + 1):
+                round_deadline = datetime.now(timezone.utc) + timedelta(
+                    hours=round_deadline_hours * (winners_rounds + losers_round)
+                )
+                round_matches = []
+
+                # Determine how many matches in this losers round
+                # This depends on the bracket structure
+                corresponding_winners_round = (losers_round + 1) // 2
+
+                if losers_round == 1:
+                    # First losers round: losers from Winners R1 play each other
+                    num_matches = len(winners_matches_by_round.get(1, [])) // 2
+                    for i in range(num_matches):
+                        match = {
+                            "id": match_id,
+                            "round": losers_round,
+                            "bracket_type": "losers",
+                            "losers_round": losers_round,
+                            "participant1": "TBD",  # Loser from WR1 match
+                            "participant2": "TBD",  # Loser from WR1 match
+                            "seed1": None,
+                            "seed2": None,
+                            "winner": None,
+                            "loser": None,
+                            "score": None,
+                            "completed": False,
+                            "deadline": round_deadline.isoformat(),
+                            "proposed_time": None,
+                            "proposed_by": None,
+                            "scheduled_time": None,
+                            "scheduling_thread": None,
+                            "reminder_sent": False,
+                            "checked_in": [],
+                            "forfeit": False,
+                            "forfeit_reason": None,
+                            "next_winner_match": None,
+                            "next_loser_match": None,
+                            "source_losers_from": [],  # Will be filled with winners bracket match IDs
+                        }
+
+                        # Link to winners bracket losers
+                        wr1_matches = winners_matches_by_round.get(1, [])
+                        if i * 2 < len(wr1_matches):
+                            match["source_losers_from"].append(wr1_matches[i * 2])
+                            for m in matches:
+                                if m["id"] == wr1_matches[i * 2]:
+                                    m["next_loser_match"] = match_id
+                                    break
+                        if i * 2 + 1 < len(wr1_matches):
+                            match["source_losers_from"].append(wr1_matches[i * 2 + 1])
+                            for m in matches:
+                                if m["id"] == wr1_matches[i * 2 + 1]:
+                                    m["next_loser_match"] = match_id
+                                    break
+
+                        matches.append(match)
+                        round_matches.append(match_id)
+                        match_id += 1
+
+                elif losers_round % 2 == 0:
+                    # Even losers rounds: previous losers round winners vs each other
+                    prev_round_matches = losers_matches_by_round.get(losers_round - 1, [])
+                    num_matches = len(prev_round_matches) // 2
+
+                    for i in range(max(1, num_matches)):
+                        match = {
+                            "id": match_id,
+                            "round": losers_round,
+                            "bracket_type": "losers",
+                            "losers_round": losers_round,
+                            "participant1": "TBD",
+                            "participant2": "TBD",
+                            "seed1": None,
+                            "seed2": None,
+                            "winner": None,
+                            "loser": None,
+                            "score": None,
+                            "completed": False,
+                            "deadline": round_deadline.isoformat(),
+                            "proposed_time": None,
+                            "proposed_by": None,
+                            "scheduled_time": None,
+                            "scheduling_thread": None,
+                            "reminder_sent": False,
+                            "checked_in": [],
+                            "forfeit": False,
+                            "forfeit_reason": None,
+                            "next_winner_match": None,
+                            "next_loser_match": None,
+                            "source_matches": [],
+                        }
+
+                        # Link from previous losers round
+                        if i * 2 < len(prev_round_matches):
+                            match["source_matches"].append(prev_round_matches[i * 2])
+                            for m in matches:
+                                if m["id"] == prev_round_matches[i * 2]:
+                                    m["next_winner_match"] = match_id
+                                    break
+                        if i * 2 + 1 < len(prev_round_matches):
+                            match["source_matches"].append(prev_round_matches[i * 2 + 1])
+                            for m in matches:
+                                if m["id"] == prev_round_matches[i * 2 + 1]:
+                                    m["next_winner_match"] = match_id
+                                    break
+
+                        matches.append(match)
+                        round_matches.append(match_id)
+                        match_id += 1
+
+                else:
+                    # Odd losers rounds (except R1): winners bracket losers drop in
+                    # Play against previous losers round winners
+                    prev_round_matches = losers_matches_by_round.get(losers_round - 1, [])
+                    winners_round_for_drops = (losers_round + 1) // 2 + 1
+                    dropping_matches = winners_matches_by_round.get(winners_round_for_drops, [])
+
+                    num_matches = max(len(prev_round_matches), len(dropping_matches) // 2)
+
+                    for i in range(max(1, num_matches)):
+                        match = {
+                            "id": match_id,
+                            "round": losers_round,
+                            "bracket_type": "losers",
+                            "losers_round": losers_round,
+                            "participant1": "TBD",  # Previous losers winner
+                            "participant2": "TBD",  # Dropping from winners
+                            "seed1": None,
+                            "seed2": None,
+                            "winner": None,
+                            "loser": None,
+                            "score": None,
+                            "completed": False,
+                            "deadline": round_deadline.isoformat(),
+                            "proposed_time": None,
+                            "proposed_by": None,
+                            "scheduled_time": None,
+                            "scheduling_thread": None,
+                            "reminder_sent": False,
+                            "checked_in": [],
+                            "forfeit": False,
+                            "forfeit_reason": None,
+                            "next_winner_match": None,
+                            "next_loser_match": None,
+                            "source_matches": [],
+                            "source_losers_from": [],
+                        }
+
+                        # Link from previous losers round winner
+                        if i < len(prev_round_matches):
+                            match["source_matches"].append(prev_round_matches[i])
+                            for m in matches:
+                                if m["id"] == prev_round_matches[i]:
+                                    m["next_winner_match"] = match_id
+                                    break
+
+                        # Link from winners bracket loser dropping down
+                        if i < len(dropping_matches):
+                            match["source_losers_from"].append(dropping_matches[i])
+                            for m in matches:
+                                if m["id"] == dropping_matches[i]:
+                                    m["next_loser_match"] = match_id
+                                    break
+
+                        matches.append(match)
+                        round_matches.append(match_id)
+                        match_id += 1
+
+                losers_matches_by_round[losers_round] = round_matches
+
+        # ==================== GRAND FINALS ====================
+        gf_deadline = datetime.now(timezone.utc) + timedelta(
+            hours=round_deadline_hours * (winners_rounds + losers_rounds + 1)
+        )
+
+        # Grand Finals Match 1
+        gf1_match = {
+            "id": match_id,
+            "round": 1,
+            "bracket_type": "grand_finals",
+            "gf_match": 1,
+            "participant1": "TBD",  # Winners bracket champion
+            "participant2": "TBD",  # Losers bracket champion
+            "seed1": None,
+            "seed2": None,
+            "winner": None,
+            "loser": None,
+            "score": None,
+            "completed": False,
+            "deadline": gf_deadline.isoformat(),
+            "proposed_time": None,
+            "proposed_by": None,
+            "scheduled_time": None,
+            "scheduling_thread": None,
+            "reminder_sent": False,
+            "checked_in": [],
+            "forfeit": False,
+            "forfeit_reason": None,
+            "next_winner_match": match_id + 1,  # Links to GF2 (bracket reset)
+            "next_loser_match": None,
+            "source_matches": [],
+        }
+
+        # Link winners bracket final to GF
+        if winners_matches_by_round.get(winners_rounds):
+            wf_match_id = winners_matches_by_round[winners_rounds][0]
+            gf1_match["source_matches"].append(wf_match_id)
+            for m in matches:
+                if m["id"] == wf_match_id:
+                    m["next_winner_match"] = match_id
+                    break
+
+        # Link losers bracket final to GF
+        if losers_matches_by_round.get(losers_rounds):
+            lf_match_id = losers_matches_by_round[losers_rounds][0]
+            gf1_match["source_matches"].append(lf_match_id)
+            for m in matches:
+                if m["id"] == lf_match_id:
+                    m["next_winner_match"] = match_id
+                    break
+
+        matches.append(gf1_match)
+        gf1_id = match_id
+        match_id += 1
+
+        # Grand Finals Match 2 (Bracket Reset - only played if losers champ wins GF1)
+        gf_reset_deadline = datetime.now(timezone.utc) + timedelta(
+            hours=round_deadline_hours * (winners_rounds + losers_rounds + 2)
+        )
+
+        gf2_match = {
+            "id": match_id,
+            "round": 2,
+            "bracket_type": "grand_finals",
+            "gf_match": 2,
+            "is_bracket_reset": True,
+            "participant1": "TBD",  # Winner of GF1 (if bracket reset needed)
+            "participant2": "TBD",  # Loser of GF1 (winners bracket champ)
+            "seed1": None,
+            "seed2": None,
+            "winner": None,
+            "loser": None,
+            "score": None,
+            "completed": False,
+            "skipped": False,  # Will be True if winners champ wins GF1
+            "deadline": gf_reset_deadline.isoformat(),
+            "proposed_time": None,
+            "proposed_by": None,
+            "scheduled_time": None,
+            "scheduling_thread": None,
+            "reminder_sent": False,
+            "checked_in": [],
+            "forfeit": False,
+            "forfeit_reason": None,
+            "next_winner_match": None,
+            "next_loser_match": None,
+            "source_matches": [gf1_id],
+        }
+        matches.append(gf2_match)
+
         return matches
 
     def _generate_round_robin(
@@ -938,6 +1388,234 @@ class ShadyTourneys(commands.Cog):
             entities = [entities[0]] + [entities[-1]] + entities[1:-1]
 
         return matches
+
+    async def _advance_bracket(
+        self,
+        guild: discord.Guild,
+        tournament: Dict[str, Any],
+        completed_match: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Advance the bracket after a match is completed.
+
+        This method:
+        1. Populates TBD slots in the next match with the winner
+        2. For double elimination, moves the loser to their losers bracket match
+        3. Handles grand finals logic (bracket reset)
+        4. Creates match threads for newly-ready matches
+
+        Returns list of matches that are now ready to be played.
+        """
+        bracket = tournament.get("bracket", [])
+        tournament_format = tournament.get("format", "single_elimination")
+        ready_matches = []
+
+        winner = completed_match.get("winner")
+        loser = completed_match.get("loser")
+
+        # If loser not explicitly set, determine it
+        if not loser and winner:
+            p1 = completed_match.get("participant1")
+            p2 = completed_match.get("participant2")
+            loser = p2 if winner == p1 else p1
+
+        # Store loser in completed match for reference
+        if loser and loser != "BYE":
+            completed_match["loser"] = loser
+
+        # Handle winner advancement
+        next_winner_match_id = completed_match.get("next_winner_match")
+        if next_winner_match_id and winner:
+            for match in bracket:
+                if match["id"] == next_winner_match_id:
+                    # Place winner in appropriate slot
+                    if match["participant1"] == "TBD":
+                        match["participant1"] = winner
+                    elif match["participant2"] == "TBD":
+                        match["participant2"] = winner
+
+                    # Check if match is now ready (both participants set and not TBD)
+                    if (match["participant1"] != "TBD" and
+                        match["participant2"] != "TBD" and
+                        not match.get("completed")):
+
+                        # Handle BYE advancement
+                        if match["participant1"] == "BYE":
+                            match["winner"] = match["participant2"]
+                            match["score"] = "BYE"
+                            match["completed"] = True
+                            # Recursively advance
+                            ready_matches.extend(await self._advance_bracket(guild, tournament, match))
+                        elif match["participant2"] == "BYE":
+                            match["winner"] = match["participant1"]
+                            match["score"] = "BYE"
+                            match["completed"] = True
+                            ready_matches.extend(await self._advance_bracket(guild, tournament, match))
+                        else:
+                            ready_matches.append(match)
+                    break
+
+        # Handle loser movement (double elimination only)
+        if tournament_format == "double_elimination" and loser and loser != "BYE":
+            next_loser_match_id = completed_match.get("next_loser_match")
+
+            if next_loser_match_id:
+                for match in bracket:
+                    if match["id"] == next_loser_match_id:
+                        # Place loser in appropriate slot
+                        if match["participant1"] == "TBD":
+                            match["participant1"] = loser
+                        elif match["participant2"] == "TBD":
+                            match["participant2"] = loser
+
+                        # Check if match is now ready
+                        if (match["participant1"] != "TBD" and
+                            match["participant2"] != "TBD" and
+                            not match.get("completed")):
+
+                            # Handle BYE
+                            if match["participant1"] == "BYE":
+                                match["winner"] = match["participant2"]
+                                match["score"] = "BYE"
+                                match["completed"] = True
+                                ready_matches.extend(await self._advance_bracket(guild, tournament, match))
+                            elif match["participant2"] == "BYE":
+                                match["winner"] = match["participant1"]
+                                match["score"] = "BYE"
+                                match["completed"] = True
+                                ready_matches.extend(await self._advance_bracket(guild, tournament, match))
+                            else:
+                                ready_matches.append(match)
+                        break
+
+        # Handle Grand Finals special logic
+        if completed_match.get("bracket_type") == "grand_finals":
+            gf_match_num = completed_match.get("gf_match", 1)
+
+            if gf_match_num == 1:
+                # GF1 completed - check if bracket reset needed
+                # Bracket reset only if the player from losers bracket wins
+
+                # Find who came from winners bracket (they have the "advantage")
+                # In GF1, participant1 should be winners bracket champ
+                winners_bracket_champ = completed_match.get("participant1")
+
+                if winner == winners_bracket_champ:
+                    # Winners bracket champ won - tournament over, skip GF2
+                    for match in bracket:
+                        if match.get("bracket_type") == "grand_finals" and match.get("gf_match") == 2:
+                            match["skipped"] = True
+                            match["completed"] = True
+                            match["score"] = "N/A"
+                            match["winner"] = winner
+                            break
+                else:
+                    # Losers bracket champ won - bracket reset needed
+                    for match in bracket:
+                        if match.get("bracket_type") == "grand_finals" and match.get("gf_match") == 2:
+                            match["participant1"] = winner  # GF1 winner
+                            match["participant2"] = loser   # GF1 loser (winners bracket champ)
+                            ready_matches.append(match)
+                            break
+
+        # Create match threads for newly ready matches
+        scheduling_channel_id = tournament.get("scheduling_channel")
+        if scheduling_channel_id and ready_matches:
+            sched_channel = guild.get_channel(scheduling_channel_id)
+            if sched_channel:
+                for match in ready_matches:
+                    if not match.get("scheduling_thread") and not match.get("completed"):
+                        try:
+                            thread = await self._create_match_thread(
+                                guild, sched_channel, match, tournament
+                            )
+                            if thread:
+                                match["scheduling_thread"] = thread.id
+                        except Exception as e:
+                            log.error(f"Failed to create match thread: {e}")
+
+        return ready_matches
+
+    def _is_tournament_complete(self, tournament: Dict[str, Any]) -> tuple[bool, Any]:
+        """Check if tournament is complete and return (is_complete, champion).
+
+        For single elimination: complete when final match is done
+        For double elimination: complete when grand finals (including potential reset) is done
+        For round robin: complete when all matches are done
+        """
+        bracket = tournament.get("bracket", [])
+        tournament_format = tournament.get("format", "single_elimination")
+
+        if not bracket:
+            return False, None
+
+        if tournament_format == "round_robin":
+            # Round robin: all matches must be complete
+            incomplete = [m for m in bracket if not m.get("completed")]
+            if incomplete:
+                return False, None
+
+            # Determine winner by most wins
+            wins = {}
+            for match in bracket:
+                winner = match.get("winner")
+                if winner:
+                    wins[winner] = wins.get(winner, 0) + 1
+
+            if wins:
+                champion = max(wins, key=wins.get)
+                return True, champion
+            return True, None
+
+        elif tournament_format == "double_elimination":
+            # Find grand finals matches
+            gf_matches = [m for m in bracket if m.get("bracket_type") == "grand_finals"]
+
+            if not gf_matches:
+                # Fallback: check if all matches complete
+                incomplete = [m for m in bracket if not m.get("completed")]
+                if incomplete:
+                    return False, None
+                # Get winner from last completed match
+                completed = [m for m in bracket if m.get("completed") and m.get("winner")]
+                if completed:
+                    return True, completed[-1].get("winner")
+                return True, None
+
+            # Check GF2 (bracket reset) status
+            gf2 = next((m for m in gf_matches if m.get("gf_match") == 2), None)
+            gf1 = next((m for m in gf_matches if m.get("gf_match") == 1), None)
+
+            if gf2:
+                if gf2.get("skipped"):
+                    # GF2 skipped means winners bracket champ won GF1
+                    return True, gf1.get("winner") if gf1 else None
+                elif gf2.get("completed"):
+                    # GF2 was played (bracket reset happened)
+                    return True, gf2.get("winner")
+                else:
+                    # GF2 not yet complete
+                    return False, None
+            elif gf1 and gf1.get("completed"):
+                # Only GF1 exists and is complete
+                return True, gf1.get("winner")
+
+            return False, None
+
+        else:
+            # Single elimination: find the final match (highest round in winners)
+            winners_matches = [m for m in bracket if m.get("bracket_type") == "winners"]
+            if not winners_matches:
+                winners_matches = bracket  # Fallback for old format
+
+            max_round = max(m.get("round", 1) for m in winners_matches)
+            final_matches = [m for m in winners_matches if m.get("round") == max_round]
+
+            if final_matches:
+                final = final_matches[0]
+                if final.get("completed"):
+                    return True, final.get("winner")
+
+            return False, None
 
     async def update_tournament_embed(self, guild: discord.Guild, tournament_id: str, tournament: Dict[str, Any]) -> None:
         """Update the tournament embed with current signup info."""
@@ -1846,6 +2524,188 @@ class ShadyTourneys(commands.Cog):
 
         return choices[:25]
 
+    async def active_tournament_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str
+    ) -> List[app_commands.Choice[str]]:
+        """Autocomplete for active (started, not completed) tournaments."""
+        tournaments = await self.config.guild(interaction.guild).tournaments()
+
+        choices = []
+        for tid, tournament in tournaments.items():
+            # Only show started, non-cancelled, non-completed tournaments
+            if tournament.get("cancelled") or not tournament.get("started"):
+                continue
+            if tournament.get("completed"):
+                continue
+
+            # Match by name or ID
+            name = tournament.get("name", "Unknown")
+            if current.lower() in name.lower() or current.lower() in tid.lower():
+                # Show status indicator
+                bracket = tournament.get("bracket", [])
+                completed = sum(1 for m in bracket if m.get("completed"))
+                total = len([m for m in bracket if m.get("participant1") != "TBD" or m.get("completed")])
+                label = f"{name} ({completed}/{total} matches)"
+                if len(label) > 100:
+                    label = label[:97] + "..."
+                choices.append(app_commands.Choice(name=label, value=tid))
+
+        return choices[:25]
+
+    @app_commands.command(name="bracket", description="View a tournament bracket")
+    @app_commands.describe(
+        tournament_id="Tournament to view (leave empty for only active tournament)"
+    )
+    @app_commands.autocomplete(tournament_id=active_tournament_autocomplete)
+    async def bracket_command(
+        self,
+        interaction: discord.Interaction,
+        tournament_id: Optional[str] = None
+    ):
+        """View a tournament bracket. Anyone can use this command."""
+        tournaments = await self.config.guild(interaction.guild).tournaments()
+
+        # If no tournament specified, try to find the only active one
+        if tournament_id is None:
+            active = [
+                (tid, t) for tid, t in tournaments.items()
+                if t.get("started") and not t.get("cancelled") and not t.get("completed")
+            ]
+
+            if len(active) == 0:
+                await interaction.response.send_message(
+                    "No active tournaments. Use `/tourney` to create one!",
+                    ephemeral=True
+                )
+                return
+            elif len(active) == 1:
+                tournament_id = active[0][0]
+            else:
+                # Multiple active - list them
+                lines = ["**Multiple active tournaments:**"]
+                for tid, t in active[:10]:
+                    lines.append(f"• **{t['name']}** - `{tid}`")
+                lines.append("\nUse `/bracket <tournament_id>` to view a specific bracket.")
+                await interaction.response.send_message("\n".join(lines), ephemeral=True)
+                return
+
+        if tournament_id not in tournaments:
+            await interaction.response.send_message(
+                "Tournament not found. Check the tournament ID.",
+                ephemeral=True
+            )
+            return
+
+        tournament = tournaments[tournament_id]
+
+        # Check tournament status
+        if tournament.get("cancelled"):
+            await interaction.response.send_message(
+                "This tournament was cancelled.",
+                ephemeral=True
+            )
+            return
+
+        if not tournament.get("started"):
+            # Show signup status instead
+            participants = tournament.get("participants", [])
+            teams = tournament.get("teams", {})
+            count = len(teams) if tournament["type"] == "team" else len(participants)
+
+            embed = discord.Embed(
+                title=f"📋 {tournament['name']} - Signups Open",
+                description="Tournament hasn't started yet. Bracket will be available after start.",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Game", value=tournament.get("game", "Unknown"), inline=True)
+            embed.add_field(name="Format", value=tournament.get("format", "single_elimination").replace("_", " ").title(), inline=True)
+            embed.add_field(name="Participants", value=str(count), inline=True)
+
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # Tournament is active - show bracket
+        bracket = tournament.get("bracket", [])
+        if not bracket:
+            await interaction.response.send_message(
+                "No bracket data available.",
+                ephemeral=True
+            )
+            return
+
+        is_team = tournament["type"] == "team"
+        tournament_format = tournament.get("format", "single_elimination")
+
+        # Calculate stats
+        total_matches = len([m for m in bracket if m.get("participant1") != "TBD" or m.get("completed")])
+        completed_matches = sum(1 for m in bracket if m.get("completed"))
+        remaining = total_matches - completed_matches
+
+        # Determine current round/phase
+        if tournament_format == "double_elimination":
+            # Find current phase
+            winners_pending = [m for m in bracket if m.get("bracket_type") == "winners" and not m.get("completed") and m.get("participant1") != "TBD"]
+            losers_pending = [m for m in bracket if m.get("bracket_type") == "losers" and not m.get("completed") and m.get("participant1") != "TBD"]
+            gf_pending = [m for m in bracket if m.get("bracket_type") == "grand_finals" and not m.get("completed") and m.get("participant1") != "TBD"]
+
+            if gf_pending:
+                current_phase = "Grand Finals"
+            elif losers_pending and not winners_pending:
+                current_phase = "Losers Bracket"
+            elif winners_pending:
+                max_round = max(m.get("round", 1) for m in winners_pending)
+                current_phase = f"Winners Round {max_round}"
+            else:
+                current_phase = "Completed"
+        else:
+            pending = [m for m in bracket if not m.get("completed") and m.get("participant1") != "TBD"]
+            if pending:
+                max_round = max(m.get("round", 1) for m in pending)
+                current_phase = f"Round {max_round}"
+            else:
+                current_phase = "Completed"
+
+        # Build embed
+        format_name = {
+            "single_elimination": "Single Elimination",
+            "double_elimination": "Double Elimination",
+            "round_robin": "Round Robin"
+        }.get(tournament_format, "Unknown")
+
+        embed = discord.Embed(
+            title=f"🏆 {tournament['name']} - Bracket",
+            color=discord.Color.gold() if tournament.get("completed") else discord.Color.blue()
+        )
+
+        embed.add_field(name="Format", value=format_name, inline=True)
+        embed.add_field(name="Status", value=current_phase, inline=True)
+        embed.add_field(name="Progress", value=f"{completed_matches}/{total_matches} matches", inline=True)
+
+        if remaining > 0:
+            embed.add_field(name="Remaining", value=f"{remaining} matches", inline=True)
+
+        # Add text bracket summary
+        bracket_text = self._format_bracket(bracket, is_team, tournament_format)
+        if len(bracket_text) > 1000:
+            bracket_text = bracket_text[:997] + "..."
+        embed.add_field(name="Current Matches", value=bracket_text, inline=False)
+
+        # Add Challonge integration
+        challonge_url = tournament.get("challonge_url")
+        challonge_image = tournament.get("challonge_image")
+
+        if challonge_image:
+            # Add timestamp to bust cache and get latest bracket
+            cache_bust = f"?t={int(datetime.now(timezone.utc).timestamp())}"
+            embed.set_image(url=challonge_image + cache_bust)
+
+        # Create view with buttons
+        view = BracketView(challonge_url)
+
+        await interaction.response.send_message(embed=embed, view=view)
+
     @app_commands.command(name="tourneymanage", description="Manage an active tournament")
     @app_commands.describe(
         action="Action to perform",
@@ -2092,11 +2952,20 @@ class ShadyTourneys(commands.Cog):
             del self.active_views[tournament_id]
 
         # Build bracket display
-        bracket_text = self._format_bracket(bracket, is_team)
+        tournament_format = tournament.get("format", "single_elimination")
+        bracket_text = self._format_bracket(bracket, is_team, tournament_format)
+
+        # Format header based on tournament format
+        format_name = {
+            "single_elimination": "Single Elimination",
+            "double_elimination": "Double Elimination",
+            "round_robin": "Round Robin"
+        }.get(tournament_format, "Unknown")
 
         response = f"🏆 **{tournament['name']}** has started!\n\n"
+        response += f"**Format:** {format_name}\n"
         response += f"**Seeding applied** (Manual → ELO → Random)\n\n"
-        response += f"**First Round Matches:**\n{bracket_text}\n\n"
+        response += f"**Bracket:**\n{bracket_text}\n\n"
 
         if challonge_url:
             response += f"📊 **Bracket:** {challonge_url}\n\n"
@@ -2109,31 +2978,81 @@ class ShadyTourneys(commands.Cog):
 
         await interaction.followup.send(response)
 
-    def _format_bracket(self, bracket: List[Dict], is_team: bool = False) -> str:
-        """Format bracket for display."""
-        lines = []
-        for match in bracket[:10]:  # Limit display
-            if match.get("completed"):
-                status = "✅"
-            else:
-                status = "⏳"
+    def _format_bracket(self, bracket: List[Dict], is_team: bool = False, tournament_format: str = "single_elimination") -> str:
+        """Format bracket for display.
 
-            p1 = match["participant1"]
-            p2 = match["participant2"]
+        For double elimination, groups matches by winners/losers/grand finals.
+        """
+        if not bracket:
+            return "No matches generated."
 
+        def format_participant(p):
+            if p == "BYE":
+                return "BYE"
+            if p == "TBD":
+                return "TBD"
             if is_team:
-                p1_str = p1 if p1 != "BYE" else "BYE"
-                p2_str = p2 if p2 != "BYE" else "BYE"
+                return str(p)
+            return f"<@{p}>"
+
+        def format_match(match):
+            status = "✅" if match.get("completed") else ("⏸️" if match.get("skipped") else "⏳")
+            p1 = format_participant(match["participant1"])
+            p2 = format_participant(match["participant2"])
+            round_num = match.get("round", "?")
+
+            if match.get("winner"):
+                winner = format_participant(match["winner"])
+                score = match.get("score", "")
+                return f"{status} R{round_num} M{match['id']}: ~~{p1}~~ vs ~~{p2}~~ → {winner} ({score})"
             else:
-                p1_str = f"<@{p1}>" if p1 != "BYE" else "BYE"
-                p2_str = f"<@{p2}>" if p2 != "BYE" else "BYE"
+                return f"{status} R{round_num} M{match['id']}: {p1} vs {p2}"
 
-            lines.append(f"{status} Match {match['match_number']}: {p1_str} vs {p2_str}")
+        lines = []
 
-        if len(bracket) > 10:
-            lines.append(f"... and {len(bracket) - 10} more matches")
+        if tournament_format == "double_elimination":
+            # Group by bracket type
+            winners = [m for m in bracket if m.get("bracket_type") == "winners"]
+            losers = [m for m in bracket if m.get("bracket_type") == "losers"]
+            grand_finals = [m for m in bracket if m.get("bracket_type") == "grand_finals"]
 
-        return "\n".join(lines) if lines else "No matches generated."
+            # Winners bracket
+            if winners:
+                lines.append("**🏆 Winners Bracket**")
+                # Only show playable matches (not TBD vs TBD)
+                playable = [m for m in winners if m["participant1"] != "TBD" or m["participant2"] != "TBD"]
+                for match in playable[:8]:
+                    lines.append(format_match(match))
+                if len(playable) > 8:
+                    lines.append(f"  ... and {len(playable) - 8} more")
+
+            # Losers bracket
+            if losers:
+                lines.append("\n**💀 Losers Bracket**")
+                playable = [m for m in losers if m["participant1"] != "TBD" or m["participant2"] != "TBD"]
+                for match in playable[:6]:
+                    lines.append(format_match(match))
+                if len(playable) > 6:
+                    lines.append(f"  ... and {len(playable) - 6} more")
+
+            # Grand Finals
+            if grand_finals:
+                lines.append("\n**🎖️ Grand Finals**")
+                for match in grand_finals:
+                    if match.get("skipped"):
+                        lines.append(f"⏸️ GF{match.get('gf_match', '?')}: Skipped (no bracket reset needed)")
+                    else:
+                        lines.append(format_match(match))
+
+        else:
+            # Single elimination or round robin - simple list
+            playable = [m for m in bracket if m["participant1"] != "TBD" or m.get("completed")]
+            for match in playable[:10]:
+                lines.append(format_match(match))
+            if len(playable) > 10:
+                lines.append(f"... and {len(playable) - 10} more matches")
+
+        return "\n".join(lines) if lines else "No matches to display."
 
     async def cancel_tournament(
         self,
@@ -2259,21 +3178,14 @@ class ShadyTourneys(commands.Cog):
         challonge_image = tournament.get("challonge_image")
 
         if challonge_image:
-            # Embed the bracket image directly
-            embed.set_image(url=challonge_image)
-            embed.add_field(
-                name="📊 Interactive Bracket",
-                value=f"[Open on Challonge]({challonge_url})",
-                inline=False
-            )
-        elif challonge_url:
-            embed.add_field(
-                name="📊 Full Bracket",
-                value=f"[View on Challonge]({challonge_url})",
-                inline=False
-            )
+            # Add timestamp to bust cache and get latest bracket
+            cache_bust = f"?t={int(datetime.now(timezone.utc).timestamp())}"
+            embed.set_image(url=challonge_image + cache_bust)
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Create view with Challonge link button
+        view = BracketView(challonge_url)
+
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     async def report_match(
         self,
@@ -2306,6 +3218,21 @@ class ShadyTourneys(commands.Cog):
 
 
 # ==================== UI VIEWS AND MODALS ====================
+
+
+class BracketView(discord.ui.View):
+    """View for bracket command with Challonge link button."""
+
+    def __init__(self, challonge_url: Optional[str] = None):
+        super().__init__(timeout=300)  # 5 minute timeout
+
+        if challonge_url:
+            self.add_item(discord.ui.Button(
+                style=discord.ButtonStyle.link,
+                label="View on Challonge",
+                url=challonge_url,
+                emoji="📊"
+            ))
 
 
 class SeedListModal(discord.ui.Modal, title="Configure Seed List"):
@@ -3189,6 +4116,7 @@ class MatchSchedulingView(discord.ui.View):
 
         # Mark forfeit
         match["winner"] = claimant
+        match["loser"] = forfeiter
         match["completed"] = True
         match["forfeit"] = True
         match["forfeit_reason"] = "no_show"
@@ -3204,15 +4132,34 @@ class MatchSchedulingView(discord.ui.View):
             "forfeiter": forfeiter
         })
 
+        # Advance the bracket
+        ready_matches = []
+        try:
+            ready_matches = await self.cog._advance_bracket(
+                interaction.guild, tournament, match
+            )
+        except Exception as e:
+            log.error(f"Failed to advance bracket after forfeit: {e}")
+
+        # Check if tournament is complete
+        is_complete, champion = self.cog._is_tournament_complete(tournament)
+        if is_complete:
+            tournament["completed"] = True
+            tournament["champion"] = champion
+
         async with self.cog.config.guild(interaction.guild).tournaments() as all_tournaments:
             all_tournaments[tournament_id] = tournament
 
-        await interaction.response.send_message(
+        response_msg = (
             f"⚠️ **Forfeit claimed!**\n"
             f"Winner: **{claimant}** (opponent no-show)\n\n"
-            f"The bracket has been updated.",
-            ephemeral=False
+            f"The bracket has been updated."
         )
+
+        if ready_matches:
+            response_msg += f"\n\n📋 **{len(ready_matches)} new match(es)** are now ready!"
+
+        await interaction.response.send_message(response_msg, ephemeral=False)
 
         # Delete the match thread after forfeit
         thread_id = match.get("scheduling_thread")
@@ -3224,6 +4171,28 @@ class MatchSchedulingView(discord.ui.View):
                     await thread.delete()
             except Exception as e:
                 log.error(f"Failed to delete match thread after forfeit: {e}")
+
+        # Check for tournament completion
+        if tournament.get("completed"):
+            if tournament["type"] == "team":
+                champion_str = f"**{champion}**"
+            else:
+                champion_str = f"<@{champion}>"
+
+            channel = interaction.guild.get_channel(tournament["channel_id"])
+            if channel:
+                try:
+                    challonge_url = tournament.get("challonge_url")
+                    bracket_link = f"\n\n📊 **Final Bracket:** {challonge_url}" if challonge_url else ""
+
+                    await channel.send(
+                        f"🏆 **{tournament['name']}** has concluded!\n\n"
+                        f"**Champion:** {champion_str}"
+                        f"{bracket_link}\n\n"
+                        "Congratulations! 🎉"
+                    )
+                except Exception as e:
+                    log.error(f"Error announcing winner: {e}")
 
 
 class SoloSignupView(discord.ui.View):
@@ -3755,17 +4724,28 @@ class MatchWinnerSelectView(discord.ui.View):
                     except Exception as e:
                         log.error(f"Failed to update team ELO: {e}")
 
-            # Check if tournament is complete
-            pending = [m for m in bracket if not m.get("completed")]
+            # Store loser in match
+            match_found["loser"] = loser
 
-            if not pending:
+            # Advance the bracket (populate next matches with winner, move loser in double elim)
+            ready_matches = []
+            try:
+                ready_matches = await self.cog._advance_bracket(
+                    interaction.guild, tournament, match_found
+                )
+            except Exception as e:
+                log.error(f"Failed to advance bracket: {e}")
+
+            # Check if tournament is complete using proper logic
+            is_complete, champion = self.cog._is_tournament_complete(tournament)
+
+            if is_complete:
                 tournament["completed"] = True
+                tournament["champion"] = champion
 
             # Report to Challonge if available
             challonge_id = tournament.get("challonge_id")
             if challonge_id and self.cog._challonge_ready:
-                # Find challonge match ID (would need to track this)
-                # For now, we'll just sync the result
                 try:
                     await self.cog._challonge_report_match(
                         challonge_id,
@@ -3778,15 +4758,23 @@ class MatchWinnerSelectView(discord.ui.View):
 
         if self.is_team:
             winner_str = f"**{winner}**"
+            loser_str = f"**{loser}**"
         else:
             winner_str = f"<@{winner}>"
+            loser_str = f"<@{loser}>"
 
-        await interaction.response.send_message(
+        # Build response message
+        response_msg = (
             f"✅ Match {self.match_id} result recorded!\n"
             f"Winner: {winner_str}\n"
-            f"Score: **{self.score}**",
-            ephemeral=True
+            f"Score: **{self.score}**"
         )
+
+        # Add info about next matches if any were created
+        if ready_matches:
+            response_msg += f"\n\n📋 **{len(ready_matches)} new match(es)** are now ready to be played!"
+
+        await interaction.response.send_message(response_msg, ephemeral=True)
 
         # Delete the match thread if it exists
         thread_id = match_found.get("scheduling_thread")
@@ -3809,18 +4797,39 @@ class MatchWinnerSelectView(discord.ui.View):
             except Exception as e:
                 log.error(f"Failed to delete match thread: {e}")
 
-        # Check for tournament completion
+        # Check for tournament completion and announce
         tournaments = await self.cog.config.guild(interaction.guild).tournaments()
         tournament = tournaments[self.tournament_id]
 
         if tournament.get("completed"):
+            # Get the actual champion from the tournament
+            champion = tournament.get("champion", winner)
+            if self.is_team:
+                champion_str = f"**{champion}**"
+            else:
+                champion_str = f"<@{champion}>"
+
             # Announce winner
             channel = interaction.guild.get_channel(tournament["channel_id"])
             if channel:
                 try:
+                    # Build announcement based on format
+                    tournament_format = tournament.get("format", "single_elimination")
+                    if tournament_format == "double_elimination":
+                        format_text = "Double Elimination"
+                    elif tournament_format == "round_robin":
+                        format_text = "Round Robin"
+                    else:
+                        format_text = "Single Elimination"
+
+                    challonge_url = tournament.get("challonge_url")
+                    bracket_link = f"\n\n📊 **Final Bracket:** {challonge_url}" if challonge_url else ""
+
                     await channel.send(
                         f"🏆 **{tournament['name']}** has concluded!\n\n"
-                        f"**Champion:** {winner_str}\n\n"
+                        f"**Format:** {format_text}\n"
+                        f"**Champion:** {champion_str}\n"
+                        f"{bracket_link}\n\n"
                         "Congratulations! 🎉"
                     )
                 except Exception as e:
