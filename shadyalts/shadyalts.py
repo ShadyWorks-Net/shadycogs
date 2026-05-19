@@ -253,17 +253,32 @@ class UnmarkAltIdModal(discord.ui.Modal, title="Unmark Alt by IDs"):
 
 
 class ShadyAlts(commands.Cog):
-    """Alt account tracking and notifications."""
+    """Alt account tracking and notifications with named networks."""
 
-    __version__ = "2.0.0"
+    __version__ = "3.0.0"
     __author__ = "ShadyTidus"
+
+    # Pre-defined network names
+    NETWORK_GENERAL = "general"      # Manual alt tracking
+    NETWORK_SUSPECT = "suspect"      # Flagged by ML (from ShadyFlags)
+    NETWORK_CONFIRMED = "confirmed"  # Banned for bot/spam (from ShadyFlags)
 
     def __init__(self, bot: Red) -> None:
         self.bot = bot
         self.config = Config.get_conf(self, identifier=CONFIG_IDENTIFIER, force_registration=True)
 
         default_guild = {
-            "alts": [],  # List of {user_id, alt_id, reason, created_at}
+            # Alt links - GUARANTEED alts (manually verified by mods)
+            # Forms natural groups based on connections
+            # List of {user_id, alt_id, reason, created_at, linked_by}
+            "alts": [],
+
+            # User status labels
+            # suspect: {user_id: {reason, risk_score, added_at, ...}}
+            # confirmed: {user_id: {reason, source, added_at, ...}}
+            "suspects": {},      # Flagged by ML, pending mod action
+            "confirmed": {},     # Banned for bot/spam - if one alt confirmed, ALL alts confirmed
+
             "mod_log_channel": None,
             "notify_on_join": True,
             "notify_on_leave": True,
@@ -316,50 +331,278 @@ class ShadyAlts(commands.Cog):
         choices.sort(key=lambda c: int(c.value))
         return choices[:25]
 
-    # ===== DATABASE METHODS =====
+    # ===== ALT LINK METHODS =====
 
-    async def add_alt(self, guild_id: int, user_id: int, alt_id: int, reason: Optional[str] = None) -> None:
-        """Add alt relationship (bidirectional)."""
+    async def add_alt(
+        self,
+        guild_id: int,
+        user_id: int,
+        alt_id: int,
+        reason: Optional[str] = None,
+        linked_by: Optional[int] = None
+    ) -> dict:
+        """Add alt relationship (bidirectional). Returns status info.
+
+        If either user is CONFIRMED, the other is auto-confirmed too.
+        """
+        result = {"added": False, "auto_confirmed": [], "warnings": []}
+
         async with self.config.guild_from_id(guild_id).alts() as alts:
+            # Check if already linked
+            exists = any(
+                (a["user_id"] == user_id and a["alt_id"] == alt_id) or
+                (a["user_id"] == alt_id and a["alt_id"] == user_id)
+                for a in alts
+            )
+
+            if exists:
+                result["warnings"].append("Already linked")
+                return result
+
             entry1 = {
                 "user_id": user_id,
                 "alt_id": alt_id,
                 "reason": reason,
+                "linked_by": linked_by,
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
             entry2 = {
                 "user_id": alt_id,
                 "alt_id": user_id,
                 "reason": reason,
+                "linked_by": linked_by,
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
 
-            exists1 = any(a["user_id"] == user_id and a["alt_id"] == alt_id for a in alts)
-            exists2 = any(a["user_id"] == alt_id and a["alt_id"] == user_id for a in alts)
+            alts.append(entry1)
+            alts.append(entry2)
+            result["added"] = True
 
-            if not exists1:
-                alts.append(entry1)
-            if not exists2:
-                alts.append(entry2)
+        # Check if either user is confirmed → auto-confirm the other
+        confirmed = await self.config.guild_from_id(guild_id).confirmed()
 
-    async def remove_alt(self, guild_id: int, user_id: int, alt_id: int) -> None:
+        user1_confirmed = str(user_id) in confirmed
+        user2_confirmed = str(alt_id) in confirmed
+
+        if user1_confirmed and not user2_confirmed:
+            # User1 is confirmed, auto-confirm user2
+            await self.add_confirmed(
+                guild_id, alt_id,
+                reason=f"Alt of confirmed bad actor {user_id}",
+                source="alt_auto_confirm"
+            )
+            result["auto_confirmed"].append(alt_id)
+            result["warnings"].append(f"User {alt_id} auto-confirmed (alt of confirmed {user_id})")
+
+        elif user2_confirmed and not user1_confirmed:
+            # User2 is confirmed, auto-confirm user1
+            await self.add_confirmed(
+                guild_id, user_id,
+                reason=f"Alt of confirmed bad actor {alt_id}",
+                source="alt_auto_confirm"
+            )
+            result["auto_confirmed"].append(user_id)
+            result["warnings"].append(f"User {user_id} auto-confirmed (alt of confirmed {alt_id})")
+
+        return result
+
+    async def remove_alt(self, guild_id: int, user_id: int, alt_id: int) -> bool:
         """Remove alt relationship (bidirectional)."""
         async with self.config.guild_from_id(guild_id).alts() as alts:
+            original_len = len(alts)
             alts[:] = [
                 a for a in alts
                 if not ((a["user_id"] == user_id and a["alt_id"] == alt_id) or
                         (a["user_id"] == alt_id and a["alt_id"] == user_id))
             ]
+            return len(alts) < original_len
 
     async def get_alts(self, guild_id: int, user_id: int) -> List[dict]:
-        """Get all alts for a user."""
+        """Get direct alts for a user."""
         alts = await self.config.guild_from_id(guild_id).alts()
         return [a for a in alts if a["user_id"] == user_id]
 
-    async def is_alt(self, guild_id: int, user_id: int, alt_id: int) -> bool:
-        """Check if two users are linked as alts."""
+    async def get_alt_group(self, guild_id: int, user_id: int) -> List[int]:
+        """Get the FULL alt group (all connected users) for a user.
+
+        Uses BFS to find all users connected through alt links.
+        E.g., if A↔B and B↔C, get_alt_group(A) returns [A, B, C]
+        """
         alts = await self.config.guild_from_id(guild_id).alts()
-        return any(a["user_id"] == user_id and a["alt_id"] == alt_id for a in alts)
+
+        # Build adjacency list
+        adj = {}
+        for a in alts:
+            uid, aid = a["user_id"], a["alt_id"]
+            if uid not in adj:
+                adj[uid] = set()
+            adj[uid].add(aid)
+
+        # BFS from user_id
+        if user_id not in adj:
+            return [user_id]  # No alts, just the user
+
+        visited = set()
+        queue = [user_id]
+        visited.add(user_id)
+
+        while queue:
+            current = queue.pop(0)
+            for neighbor in adj.get(current, []):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+
+        return list(visited)
+
+    async def is_alt(self, guild_id: int, user_id: int, alt_id: int) -> bool:
+        """Check if two users are linked as alts (directly or in same group)."""
+        group = await self.get_alt_group(guild_id, user_id)
+        return alt_id in group
+
+    # ===== SUSPECT METHODS =====
+
+    async def add_suspect(
+        self,
+        guild_id: int,
+        user_id: int,
+        reason: str,
+        risk_score: float = 0.0,
+        **extra_data
+    ) -> bool:
+        """Add a user to the suspect list."""
+        # Don't add if already confirmed
+        confirmed = await self.config.guild_from_id(guild_id).confirmed()
+        if str(user_id) in confirmed:
+            return False
+
+        async with self.config.guild_from_id(guild_id).suspects() as suspects:
+            if str(user_id) in suspects:
+                return False  # Already suspect
+
+            suspects[str(user_id)] = {
+                "user_id": user_id,
+                "reason": reason,
+                "risk_score": risk_score,
+                "added_at": datetime.now(timezone.utc).isoformat(),
+                **extra_data
+            }
+            return True
+
+    async def remove_suspect(self, guild_id: int, user_id: int) -> Optional[dict]:
+        """Remove a user from suspects. Returns their data if removed."""
+        async with self.config.guild_from_id(guild_id).suspects() as suspects:
+            return suspects.pop(str(user_id), None)
+
+    async def get_suspect(self, guild_id: int, user_id: int) -> Optional[dict]:
+        """Get suspect data for a user."""
+        suspects = await self.config.guild_from_id(guild_id).suspects()
+        return suspects.get(str(user_id))
+
+    async def get_all_suspects(self, guild_id: int) -> List[dict]:
+        """Get all suspects."""
+        suspects = await self.config.guild_from_id(guild_id).suspects()
+        return list(suspects.values())
+
+    # ===== CONFIRMED METHODS =====
+
+    async def add_confirmed(
+        self,
+        guild_id: int,
+        user_id: int,
+        reason: str,
+        source: str = "manual",
+        **extra_data
+    ) -> dict:
+        """Add a user to confirmed bad actors.
+
+        Also confirms ALL their alts (guaranteed same person).
+        Returns info about who was confirmed.
+        """
+        result = {"confirmed": [], "already_confirmed": [], "removed_from_suspect": []}
+
+        # Get the full alt group
+        alt_group = await self.get_alt_group(guild_id, user_id)
+
+        # Remove from suspects if present
+        suspect_data = await self.remove_suspect(guild_id, user_id)
+        if suspect_data:
+            result["removed_from_suspect"].append(user_id)
+
+        async with self.config.guild_from_id(guild_id).confirmed() as confirmed:
+            for uid in alt_group:
+                if str(uid) in confirmed:
+                    result["already_confirmed"].append(uid)
+                    continue
+
+                # Remove from suspects
+                sus = await self.remove_suspect(guild_id, uid)
+                if sus:
+                    result["removed_from_suspect"].append(uid)
+
+                # Add to confirmed
+                confirmed[str(uid)] = {
+                    "user_id": uid,
+                    "reason": reason if uid == user_id else f"Alt of {user_id}: {reason}",
+                    "source": source if uid == user_id else "alt_auto_confirm",
+                    "confirmed_via": user_id if uid != user_id else None,
+                    "added_at": datetime.now(timezone.utc).isoformat(),
+                    **extra_data
+                }
+                result["confirmed"].append(uid)
+
+        return result
+
+    async def remove_confirmed(self, guild_id: int, user_id: int) -> Optional[dict]:
+        """Remove a user from confirmed. Does NOT remove their alts."""
+        async with self.config.guild_from_id(guild_id).confirmed() as confirmed:
+            return confirmed.pop(str(user_id), None)
+
+    async def get_confirmed(self, guild_id: int, user_id: int) -> Optional[dict]:
+        """Get confirmed data for a user."""
+        confirmed = await self.config.guild_from_id(guild_id).confirmed()
+        return confirmed.get(str(user_id))
+
+    async def get_all_confirmed(self, guild_id: int) -> List[dict]:
+        """Get all confirmed bad actors."""
+        confirmed = await self.config.guild_from_id(guild_id).confirmed()
+        return list(confirmed.values())
+
+    async def is_confirmed(self, guild_id: int, user_id: int) -> bool:
+        """Check if user is a confirmed bad actor."""
+        confirmed = await self.config.guild_from_id(guild_id).confirmed()
+        return str(user_id) in confirmed
+
+    async def promote_suspect_to_confirmed(
+        self,
+        guild_id: int,
+        user_id: int,
+        reason: str,
+        source: str = "mod_action"
+    ) -> dict:
+        """Move a user from suspect to confirmed (and all their alts)."""
+        return await self.add_confirmed(guild_id, user_id, reason, source)
+
+    # ===== STATS =====
+
+    async def get_stats(self, guild_id: int) -> dict:
+        """Get statistics."""
+        alts = await self.config.guild_from_id(guild_id).alts()
+        suspects = await self.config.guild_from_id(guild_id).suspects()
+        confirmed = await self.config.guild_from_id(guild_id).confirmed()
+
+        # Count unique users in alt links
+        alt_users = set()
+        for a in alts:
+            alt_users.add(a["user_id"])
+            alt_users.add(a["alt_id"])
+
+        return {
+            "alt_links": len(alts) // 2,  # Bidirectional
+            "users_with_alts": len(alt_users),
+            "suspects": len(suspects),
+            "confirmed": len(confirmed),
+        }
 
     async def log_to_mod_channel(self, guild: discord.Guild, message: Optional[str] = None, embed: Optional[discord.Embed] = None) -> None:
         """Log message to mod channel."""
@@ -660,6 +903,154 @@ class ShadyAlts(commands.Cog):
             )
 
             await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ===== NETWORK VIEW COMMANDS =====
+
+    @app_commands.command(name="altnetwork", description="View suspect or confirmed bad actor networks")
+    @app_commands.describe(
+        network="Which network to view",
+        user_id="Optional: Check specific user ID"
+    )
+    @app_commands.choices(network=[
+        app_commands.Choice(name="View Suspects (ML flagged)", value="suspect"),
+        app_commands.Choice(name="View Confirmed (banned bad actors)", value="confirmed"),
+        app_commands.Choice(name="View Stats", value="stats"),
+    ])
+    async def altnetwork_cmd(
+        self,
+        interaction: discord.Interaction,
+        network: str,
+        user_id: Optional[str] = None
+    ):
+        """View suspect or confirmed networks."""
+        if not await self.is_authorized(interaction):
+            await interaction.response.send_message(
+                "You don't have permission to use this command.", ephemeral=True
+            )
+            return
+
+        if network == "stats":
+            stats = await self.get_stats(interaction.guild.id)
+
+            embed = discord.Embed(
+                title="📊 Alt Network Statistics",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Alt Links", value=str(stats["alt_links"]), inline=True)
+            embed.add_field(name="Users with Alts", value=str(stats["users_with_alts"]), inline=True)
+            embed.add_field(name="Suspects", value=str(stats["suspects"]), inline=True)
+            embed.add_field(name="Confirmed Bad", value=str(stats["confirmed"]), inline=True)
+
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        if user_id:
+            # Check specific user
+            try:
+                uid = int(user_id.strip())
+            except ValueError:
+                await interaction.response.send_message("Invalid user ID.", ephemeral=True)
+                return
+
+            if network == "suspect":
+                data = await self.get_suspect(interaction.guild.id, uid)
+                if data:
+                    embed = discord.Embed(
+                        title="🔍 Suspect Found",
+                        description=f"<@{uid}> (`{uid}`) is in the suspect network",
+                        color=discord.Color.orange()
+                    )
+                    embed.add_field(name="Reason", value=data.get("reason", "N/A"), inline=False)
+                    embed.add_field(name="Risk Score", value=f"{data.get('risk_score', 0)*100:.0f}%", inline=True)
+                    embed.add_field(name="Added", value=f"<t:{int(datetime.fromisoformat(data.get('added_at', datetime.now(timezone.utc).isoformat())).timestamp())}:R>", inline=True)
+                else:
+                    embed = discord.Embed(
+                        title="✅ Not a Suspect",
+                        description=f"User `{uid}` is not in the suspect network",
+                        color=discord.Color.green()
+                    )
+            else:  # confirmed
+                data = await self.get_confirmed(interaction.guild.id, uid)
+                if data:
+                    embed = discord.Embed(
+                        title="🚨 Confirmed Bad Actor",
+                        description=f"<@{uid}> (`{uid}`) is a confirmed bad actor",
+                        color=discord.Color.red()
+                    )
+                    embed.add_field(name="Reason", value=data.get("reason", "N/A"), inline=False)
+                    embed.add_field(name="Source", value=data.get("source", "N/A"), inline=True)
+                    if data.get("confirmed_via"):
+                        embed.add_field(name="Confirmed Via", value=f"<@{data['confirmed_via']}>", inline=True)
+                else:
+                    embed = discord.Embed(
+                        title="✅ Not Confirmed",
+                        description=f"User `{uid}` is not in the confirmed network",
+                        color=discord.Color.green()
+                    )
+
+            # Also show their alt group
+            alt_group = await self.get_alt_group(interaction.guild.id, uid)
+            if len(alt_group) > 1:
+                alt_mentions = [f"<@{a}>" for a in alt_group if a != uid][:10]
+                embed.add_field(
+                    name=f"Alt Group ({len(alt_group)} users)",
+                    value=", ".join(alt_mentions) or "None",
+                    inline=False
+                )
+
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # List all in network
+        if network == "suspect":
+            members = await self.get_all_suspects(interaction.guild.id)
+            title = "🔍 Suspect Network"
+            color = discord.Color.orange()
+            empty_msg = "No suspects in the network.\nSuspects are added by ShadyFlags ML detection."
+        else:  # confirmed
+            members = await self.get_all_confirmed(interaction.guild.id)
+            title = "🚨 Confirmed Bad Actors"
+            color = discord.Color.red()
+            empty_msg = "No confirmed bad actors.\nUsers are confirmed when banned for bot/spam."
+
+        if not members:
+            await interaction.response.send_message(empty_msg, ephemeral=True)
+            return
+
+        # Sort by added_at (most recent first)
+        members.sort(key=lambda x: x.get("added_at", ""), reverse=True)
+
+        embed = discord.Embed(title=title, color=color)
+
+        # Show up to 20 members
+        for m in members[:20]:
+            uid = m.get("user_id")
+            reason = m.get("reason", "N/A")[:50]
+
+            # Try to get username
+            try:
+                user = await self.bot.fetch_user(uid)
+                name = f"{user.name} ({uid})"
+            except:
+                name = f"User {uid}"
+
+            if network == "suspect":
+                risk = m.get("risk_score", 0)
+                embed.add_field(
+                    name=f"🔍 {name}",
+                    value=f"Risk: {risk*100:.0f}%\n{reason}",
+                    inline=True
+                )
+            else:
+                source = m.get("source", "N/A")
+                embed.add_field(
+                    name=f"🚨 {name}",
+                    value=f"Source: {source}\n{reason}",
+                    inline=True
+                )
+
+        embed.set_footer(text=f"Total: {len(members)} | Showing {min(len(members), 20)}")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ===== SETTINGS =====
 

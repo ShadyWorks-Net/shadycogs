@@ -1,12 +1,16 @@
 {
     "author": ["ShadyTidus"],
     "name": "ShadyFlags",
-    "short": "Temporary warning/flag system with auto-flagging",
-    "description": "Comprehensive flag system for tracking suspicious accounts. Auto-flags new accounts based on age thresholds with critical/high/medium priorities. Features flag review queue UI, statistics/metrics, configurable moderator roles, and decision logging for ML training data.",
-    "install_msg": "ShadyFlags installed!\n\nCommands:\n- `/flag` - Manage flags for server members\n- `/flagid` - Manage flags by user ID\n- `/flagall` - View all flagged members\n- `/flagqueue` - Review flagged users with action buttons\n- `/flagstats` - View flag statistics\n- `/flagset` - Configure settings\n\nSetup:\n1. `/flagset channel` - Set mod log channel\n2. `/flagset addrole` - Add mod roles (optional)",
-    "end_user_data_statement": "This cog stores user IDs of flagged users, flag reasons, moderator IDs who created flags, timestamps, and flag decision history.",
-    "tags": ["moderation", "flags", "alt detection", "security", "new accounts", "warnings"],
+    "short": "ML-powered suspect detection with two-tier network",
+    "description": "Comprehensive flag system with ML-based risk scoring. Automatically detects suspicious accounts on join and adds them to a suspect network. When mods take action (ban/kick), suspects are promoted to the confirmed bad actor network, creating labeled training data for the ML model. Features include: two-tier network (suspect → confirmed), historical mod log scanning for bootstrap, ShadyAlts integration for toxic alt detection, confidence-based flagging, and automatic ML training data generation.",
+    "install_msg": "ShadyFlags v3.0 installed!\n\n**Quick Setup:**\n1. `/flagset channel` - Set mod log channel (REQUIRED)\n2. `/flagnetwork scan` - Scan mod log history to bootstrap network\n\n**How it works:**\n• New members are risk-scored on join\n• High risk → Added to SUSPECT network + flagged with confidence %\n• When you ban a suspect for bot/spam → Moved to CONFIRMED network\n• Confirmed data trains the ML model\n\n**Commands:**\n- `/flag` - Manage flags\n- `/flagqueue` - Review flagged users\n- `/flagnetwork stats` - View suspect/confirmed stats\n- `/flagnetwork scan` - Bootstrap from mod log history\n- `/flagml` - ML model management",
+    "end_user_data_statement": "This cog stores user IDs, flag data, join features for ML training, suspect network data, and confirmed bad actor network data.",
+    "tags": ["moderation", "flags", "ml", "risk scoring", "suspect detection", "bot detection", "spam detection"],
     "type": "COG",
     "min_bot_version": "3.5.0",
-    "min_python_version": [3, 9, 0]
+    "min_python_version": [3, 9, 0],
+    "requirements": [
+        "scikit-learn",
+        "numpy"
+    ]
 }
