@@ -1,0 +1,696 @@
+"""
+ShadyAnnounce - Scheduled announcements with timezone support
+
+Allows staff to schedule posts to channels using their personal timezone.
+Features preview/edit workflow before final confirmation.
+"""
+
+import asyncio
+import logging
+from datetime import datetime, timezone
+from typing import List, Optional
+from zoneinfo import ZoneInfo
+
+import discord
+from discord import app_commands
+from discord.ui import Button, Modal, Select, TextInput, View
+from redbot.core import Config, commands
+from redbot.core.bot import Red
+
+log = logging.getLogger("red.shadycogs.shadyannounce")
+
+CONFIG_IDENTIFIER = 0x53484144_59414E4E  # SHADYANN
+
+# Common timezones for dropdown
+COMMON_TIMEZONES = [
+    # US
+    ("America/New_York", "US Eastern (ET)"),
+    ("America/Chicago", "US Central (CT)"),
+    ("America/Denver", "US Mountain (MT)"),
+    ("America/Los_Angeles", "US Pacific (PT)"),
+    ("America/Anchorage", "US Alaska (AKT)"),
+    ("Pacific/Honolulu", "US Hawaii (HT)"),
+    # Europe
+    ("Europe/London", "UK (GMT/BST)"),
+    ("Europe/Paris", "Central Europe (CET)"),
+    ("Europe/Berlin", "Germany (CET)"),
+    ("Europe/Amsterdam", "Netherlands (CET)"),
+    ("Europe/Helsinki", "Finland (EET)"),
+    ("Europe/Moscow", "Moscow (MSK)"),
+    # Asia/Pacific
+    ("Asia/Tokyo", "Japan (JST)"),
+    ("Asia/Shanghai", "China (CST)"),
+    ("Asia/Singapore", "Singapore (SGT)"),
+    ("Australia/Sydney", "Australia Eastern (AEST)"),
+    ("Australia/Perth", "Australia Western (AWST)"),
+    ("Pacific/Auckland", "New Zealand (NZST)"),
+    # Other
+    ("UTC", "UTC"),
+]
+
+
+def parse_datetime(text: str, user_tz: ZoneInfo) -> Optional[datetime]:
+    """
+    Parse user input into a datetime in the user's timezone.
+    Supports formats like:
+    - 2024-01-15 14:30
+    - 01/15/2024 2:30 PM
+    - 15-01-2024 14:30
+    - Jan 15, 2024 2:30 PM
+    """
+    formats = [
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %I:%M %p",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%Y %I:%M %p",
+        "%d-%m-%Y %H:%M",
+        "%d-%m-%Y %I:%M %p",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y %I:%M %p",
+        "%b %d, %Y %H:%M",
+        "%b %d, %Y %I:%M %p",
+        "%B %d, %Y %H:%M",
+        "%B %d, %Y %I:%M %p",
+    ]
+
+    text = text.strip()
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.replace(tzinfo=user_tz)
+        except ValueError:
+            continue
+    return None
+
+
+# ==================== UI COMPONENTS ====================
+
+
+class TimezoneSelect(Select):
+    """Dropdown for selecting timezone."""
+
+    def __init__(self, cog: "ShadyAnnounce"):
+        self.cog = cog
+        options = [
+            discord.SelectOption(label=label, value=tz_name, description=tz_name)
+            for tz_name, label in COMMON_TIMEZONES
+        ]
+        super().__init__(
+            placeholder="Select your timezone...",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        tz_name = self.values[0]
+        await self.cog.config.member(interaction.user).timezone.set(tz_name)
+        # Find display name
+        display = next((label for name, label in COMMON_TIMEZONES if name == tz_name), tz_name)
+        await interaction.response.send_message(
+            f"Your timezone has been set to **{display}** (`{tz_name}`).",
+            ephemeral=True,
+        )
+        self.view.stop()
+
+
+class TimezoneView(View):
+    """View containing timezone selector."""
+
+    def __init__(self, cog: "ShadyAnnounce"):
+        super().__init__(timeout=120)
+        self.add_item(TimezoneSelect(cog))
+
+
+class AnnounceModal(Modal):
+    """Modal for entering announcement details."""
+
+    def __init__(
+        self,
+        cog: "ShadyAnnounce",
+        channel: discord.TextChannel,
+        user_tz: ZoneInfo,
+        prefill_time: str = "",
+        prefill_content: str = "",
+    ):
+        super().__init__(title="Schedule Announcement")
+        self.cog = cog
+        self.channel = channel
+        self.user_tz = user_tz
+
+        self.datetime_input = TextInput(
+            label="Date & Time (in your timezone)",
+            placeholder="e.g. 2024-01-15 14:30 or Jan 15, 2024 2:30 PM",
+            required=True,
+            max_length=50,
+            default=prefill_time,
+        )
+        self.content_input = TextInput(
+            label="Announcement Content",
+            placeholder="Supports Discord markdown: **bold**, *italic*, ||spoiler||, etc.",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=2000,
+            default=prefill_content,
+        )
+        self.add_item(self.datetime_input)
+        self.add_item(self.content_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        time_str = self.datetime_input.value
+        content = self.content_input.value
+
+        # Parse the datetime
+        scheduled_dt = parse_datetime(time_str, self.user_tz)
+        if not scheduled_dt:
+            await interaction.response.send_message(
+                "Could not parse the date/time. Please use a format like:\n"
+                "- `2024-01-15 14:30`\n"
+                "- `Jan 15, 2024 2:30 PM`\n"
+                "- `01/15/2024 14:30`",
+                ephemeral=True,
+            )
+            return
+
+        # Check if in the future
+        now = datetime.now(self.user_tz)
+        if scheduled_dt <= now:
+            await interaction.response.send_message(
+                "The scheduled time must be in the future.",
+                ephemeral=True,
+            )
+            return
+
+        # Convert to UTC for storage
+        scheduled_utc = scheduled_dt.astimezone(timezone.utc)
+        unix_ts = int(scheduled_utc.timestamp())
+
+        # Show preview
+        view = PreviewView(
+            cog=self.cog,
+            channel=self.channel,
+            content=content,
+            scheduled_utc=scheduled_utc,
+            user_tz=self.user_tz,
+            time_str=time_str,
+            user=interaction.user,
+        )
+
+        await interaction.response.send_message(
+            f"**Preview of Scheduled Announcement**\n\n"
+            f"**Channel:** {self.channel.mention}\n"
+            f"**Scheduled for:** <t:{unix_ts}:F> (<t:{unix_ts}:R>)\n\n"
+            f"**Content:**\n{content}",
+            view=view,
+            ephemeral=True,
+        )
+
+
+class PreviewView(View):
+    """View for preview with Confirm/Edit/Cancel buttons."""
+
+    def __init__(
+        self,
+        cog: "ShadyAnnounce",
+        channel: discord.TextChannel,
+        content: str,
+        scheduled_utc: datetime,
+        user_tz: ZoneInfo,
+        time_str: str,
+        user: discord.Member,
+    ):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.channel = channel
+        self.content = content
+        self.scheduled_utc = scheduled_utc
+        self.user_tz = user_tz
+        self.time_str = time_str
+        self.user = user
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="\u2705")
+    async def confirm_button(self, interaction: discord.Interaction, button: Button):
+        # Double-check it's still in the future
+        if self.scheduled_utc <= datetime.now(timezone.utc):
+            await interaction.response.send_message(
+                "The scheduled time is now in the past. Please reschedule.",
+                ephemeral=True,
+            )
+            return
+
+        # Save to config
+        async with self.cog.config.guild(interaction.guild).scheduled() as scheduled:
+            # Generate ID
+            new_id = max((a["id"] for a in scheduled), default=0) + 1
+            announcement = {
+                "id": new_id,
+                "channel_id": self.channel.id,
+                "content": self.content,
+                "scheduled_for": self.scheduled_utc.isoformat(),
+                "created_by": interaction.user.id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            scheduled.append(announcement)
+
+        unix_ts = int(self.scheduled_utc.timestamp())
+        await interaction.response.edit_message(
+            content=f"Announcement scheduled for <t:{unix_ts}:F> in {self.channel.mention}. (ID: `{new_id}`)",
+            view=None,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Edit", style=discord.ButtonStyle.primary, emoji="\u270f\ufe0f")
+    async def edit_button(self, interaction: discord.Interaction, button: Button):
+        modal = AnnounceModal(
+            cog=self.cog,
+            channel=self.channel,
+            user_tz=self.user_tz,
+            prefill_time=self.time_str,
+            prefill_content=self.content,
+        )
+        await interaction.response.send_modal(modal)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="\u274c")
+    async def cancel_button(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.edit_message(
+            content="Announcement cancelled.",
+            view=None,
+        )
+        self.stop()
+
+
+class AnnounceCancelView(View):
+    """View for confirming cancellation of an announcement."""
+
+    def __init__(self, cog: "ShadyAnnounce", announcement_id: int):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.announcement_id = announcement_id
+
+    @discord.ui.button(label="Confirm Cancel", style=discord.ButtonStyle.danger)
+    async def confirm_cancel(self, interaction: discord.Interaction, button: Button):
+        async with self.cog.config.guild(interaction.guild).scheduled() as scheduled:
+            for i, ann in enumerate(scheduled):
+                if ann["id"] == self.announcement_id:
+                    del scheduled[i]
+                    await interaction.response.edit_message(
+                        content=f"Announcement #{self.announcement_id} has been cancelled.",
+                        view=None,
+                    )
+                    self.stop()
+                    return
+
+        await interaction.response.edit_message(
+            content="Announcement not found (may have already been posted or cancelled).",
+            view=None,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Keep", style=discord.ButtonStyle.secondary)
+    async def keep_button(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.edit_message(
+            content="Cancellation aborted. The announcement will remain scheduled.",
+            view=None,
+        )
+        self.stop()
+
+
+# ==================== MAIN COG ====================
+
+
+class ShadyAnnounce(commands.Cog):
+    """Schedule announcements with timezone support."""
+
+    __version__ = "1.0.0"
+    __author__ = "ShadyTidus"
+
+    def __init__(self, bot: Red) -> None:
+        super().__init__()
+        self.bot = bot
+        self.config = Config.get_conf(self, identifier=CONFIG_IDENTIFIER, force_registration=True)
+
+        default_guild = {
+            "scheduled": [],
+            "history": [],
+            "max_history": 50,
+            "mod_roles": [],
+        }
+        default_member = {
+            "timezone": None,
+        }
+        self.config.register_guild(**default_guild)
+        self.config.register_member(**default_member)
+        self.announcement_task: Optional[asyncio.Task] = None
+
+    async def cog_load(self) -> None:
+        self.announcement_task = self.bot.loop.create_task(self._announcement_loop())
+        log.info("ShadyAnnounce loaded")
+
+    async def cog_unload(self) -> None:
+        if self.announcement_task:
+            self.announcement_task.cancel()
+
+    # ==================== AUTHORIZATION ====================
+
+    async def is_authorized(self, ctx_or_interaction) -> bool:
+        """Check if user has permission to manage announcements."""
+        if isinstance(ctx_or_interaction, discord.Interaction):
+            user = ctx_or_interaction.user
+            guild = ctx_or_interaction.guild
+        else:
+            user = ctx_or_interaction.author
+            guild = ctx_or_interaction.guild
+
+        if await self.bot.is_owner(user):
+            return True
+        if not isinstance(user, discord.Member):
+            return False
+        if user.guild_permissions.administrator or user == guild.owner:
+            return True
+        if user.guild_permissions.manage_guild:
+            return True
+        mod_roles = await self.config.guild(guild).mod_roles()
+        return any(role.id in mod_roles for role in user.roles)
+
+    # ==================== BACKGROUND TASK ====================
+
+    async def _announcement_loop(self) -> None:
+        """Background loop to post scheduled announcements."""
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                for guild in self.bot.guilds:
+                    await self._process_guild_announcements(guild)
+                await asyncio.sleep(180)  # Check every 3 minutes
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.error(f"Error in announcement loop: {e}")
+                await asyncio.sleep(180)
+
+    async def _process_guild_announcements(self, guild: discord.Guild) -> None:
+        """Process and post due announcements for a guild."""
+        now = datetime.now(timezone.utc)
+        async with self.config.guild(guild).scheduled() as scheduled:
+            to_remove = []
+            for ann in scheduled:
+                scheduled_for = datetime.fromisoformat(ann["scheduled_for"])
+                if scheduled_for <= now:
+                    # Time to post
+                    channel = guild.get_channel(ann["channel_id"])
+                    if channel:
+                        try:
+                            await channel.send(ann["content"])
+                            log.info(f"Posted announcement #{ann['id']} to {channel.name}")
+                        except discord.Forbidden:
+                            log.warning(f"No permission to post in {channel.name}")
+                        except Exception as e:
+                            log.error(f"Failed to post announcement #{ann['id']}: {e}")
+
+                    # Move to history
+                    async with self.config.guild(guild).history() as history:
+                        history_entry = {**ann, "posted_at": now.isoformat()}
+                        history.append(history_entry)
+                        # Trim history
+                        max_history = await self.config.guild(guild).max_history()
+                        while len(history) > max_history:
+                            history.pop(0)
+
+                    to_remove.append(ann)
+
+            for ann in to_remove:
+                scheduled.remove(ann)
+
+    # ==================== COMMANDS ====================
+
+    @app_commands.command(name="mytime", description="Set your timezone for scheduling announcements")
+    @app_commands.guild_only()
+    async def mytime(self, interaction: discord.Interaction):
+        """Set your personal timezone."""
+        current_tz = await self.config.member(interaction.user).timezone()
+        if current_tz:
+            display = next((label for name, label in COMMON_TIMEZONES if name == current_tz), current_tz)
+            content = f"Your current timezone is **{display}** (`{current_tz}`).\nSelect a new one below to change it:"
+        else:
+            content = "Select your timezone from the dropdown below:"
+
+        view = TimezoneView(self)
+        await interaction.response.send_message(content, view=view, ephemeral=True)
+
+    @app_commands.command(name="announce", description="Schedule an announcement to the current channel")
+    @app_commands.guild_only()
+    async def announce(self, interaction: discord.Interaction):
+        """Schedule an announcement to the current channel."""
+        if not await self.is_authorized(interaction):
+            await interaction.response.send_message(
+                "You don't have permission to schedule announcements.",
+                ephemeral=True,
+            )
+            return
+
+        # Check timezone is set
+        user_tz_name = await self.config.member(interaction.user).timezone()
+        if not user_tz_name:
+            await interaction.response.send_message(
+                "Please set your timezone first using `/mytime`.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            user_tz = ZoneInfo(user_tz_name)
+        except Exception:
+            await interaction.response.send_message(
+                f"Invalid timezone stored: `{user_tz_name}`. Please run `/mytime` again.",
+                ephemeral=True,
+            )
+            return
+
+        # Check bot permissions in channel
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "Announcements can only be scheduled for text channels.",
+                ephemeral=True,
+            )
+            return
+
+        perms = channel.permissions_for(interaction.guild.me)
+        if not perms.send_messages:
+            await interaction.response.send_message(
+                f"I don't have permission to send messages in {channel.mention}.",
+                ephemeral=True,
+            )
+            return
+
+        modal = AnnounceModal(cog=self, channel=channel, user_tz=user_tz)
+        await interaction.response.send_modal(modal)
+
+    @app_commands.command(name="announcelist", description="View pending scheduled announcements")
+    @app_commands.guild_only()
+    async def announcelist(self, interaction: discord.Interaction):
+        """View all pending scheduled announcements."""
+        if not await self.is_authorized(interaction):
+            await interaction.response.send_message(
+                "You don't have permission to view scheduled announcements.",
+                ephemeral=True,
+            )
+            return
+
+        scheduled = await self.config.guild(interaction.guild).scheduled()
+        if not scheduled:
+            await interaction.response.send_message(
+                "No announcements are currently scheduled.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if admin (can see all) or regular mod (own only)
+        is_admin = (
+            interaction.user.guild_permissions.administrator
+            or interaction.user == interaction.guild.owner
+            or await self.bot.is_owner(interaction.user)
+        )
+
+        lines = []
+        for ann in sorted(scheduled, key=lambda a: a["scheduled_for"]):
+            # Filter by user if not admin
+            if not is_admin and ann["created_by"] != interaction.user.id:
+                continue
+
+            scheduled_for = datetime.fromisoformat(ann["scheduled_for"])
+            unix_ts = int(scheduled_for.timestamp())
+            channel = interaction.guild.get_channel(ann["channel_id"])
+            channel_mention = channel.mention if channel else f"<#{ann['channel_id']}>"
+
+            # Truncate content preview
+            content_preview = ann["content"][:50]
+            if len(ann["content"]) > 50:
+                content_preview += "..."
+
+            creator = interaction.guild.get_member(ann["created_by"])
+            creator_name = creator.display_name if creator else f"User {ann['created_by']}"
+
+            lines.append(
+                f"**#{ann['id']}** \u2022 {channel_mention} \u2022 <t:{unix_ts}:R>\n"
+                f"  By: {creator_name}\n"
+                f"  `{content_preview}`"
+            )
+
+        if not lines:
+            await interaction.response.send_message(
+                "You have no pending scheduled announcements.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            "**Scheduled Announcements**\n\n" + "\n\n".join(lines),
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="announcecancel", description="Cancel a scheduled announcement")
+    @app_commands.describe(announcement_id="The ID of the announcement to cancel")
+    @app_commands.guild_only()
+    async def announcecancel(self, interaction: discord.Interaction, announcement_id: int):
+        """Cancel a scheduled announcement."""
+        if not await self.is_authorized(interaction):
+            await interaction.response.send_message(
+                "You don't have permission to cancel announcements.",
+                ephemeral=True,
+            )
+            return
+
+        scheduled = await self.config.guild(interaction.guild).scheduled()
+        announcement = next((a for a in scheduled if a["id"] == announcement_id), None)
+
+        if not announcement:
+            await interaction.response.send_message(
+                f"Announcement #{announcement_id} not found.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if user owns it or is admin
+        is_admin = (
+            interaction.user.guild_permissions.administrator
+            or interaction.user == interaction.guild.owner
+            or await self.bot.is_owner(interaction.user)
+        )
+
+        if not is_admin and announcement["created_by"] != interaction.user.id:
+            await interaction.response.send_message(
+                "You can only cancel your own announcements.",
+                ephemeral=True,
+            )
+            return
+
+        # Show confirmation
+        scheduled_for = datetime.fromisoformat(announcement["scheduled_for"])
+        unix_ts = int(scheduled_for.timestamp())
+        channel = interaction.guild.get_channel(announcement["channel_id"])
+        channel_mention = channel.mention if channel else f"<#{announcement['channel_id']}>"
+
+        content_preview = announcement["content"][:200]
+        if len(announcement["content"]) > 200:
+            content_preview += "..."
+
+        view = AnnounceCancelView(self, announcement_id)
+        await interaction.response.send_message(
+            f"**Cancel Announcement #{announcement_id}?**\n\n"
+            f"**Channel:** {channel_mention}\n"
+            f"**Scheduled for:** <t:{unix_ts}:F>\n"
+            f"**Content:**\n{content_preview}",
+            view=view,
+            ephemeral=True,
+        )
+
+    # ==================== SETTINGS GROUP ====================
+
+    announceset = app_commands.Group(
+        name="announceset",
+        description="Configure announcement settings",
+        guild_only=True,
+    )
+
+    @announceset.command(name="addrole", description="Add a role that can schedule announcements")
+    @app_commands.describe(role="The role to add")
+    async def announceset_addrole(self, interaction: discord.Interaction, role: discord.Role):
+        """Add a role that can schedule announcements."""
+        if not interaction.user.guild_permissions.administrator and not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message(
+                "Only administrators can manage announcement roles.",
+                ephemeral=True,
+            )
+            return
+
+        async with self.config.guild(interaction.guild).mod_roles() as mod_roles:
+            if role.id in mod_roles:
+                await interaction.response.send_message(
+                    f"{role.mention} can already schedule announcements.",
+                    ephemeral=True,
+                )
+                return
+            mod_roles.append(role.id)
+
+        await interaction.response.send_message(
+            f"{role.mention} can now schedule announcements.",
+            ephemeral=True,
+        )
+
+    @announceset.command(name="removerole", description="Remove a role from scheduling announcements")
+    @app_commands.describe(role="The role to remove")
+    async def announceset_removerole(self, interaction: discord.Interaction, role: discord.Role):
+        """Remove a role from scheduling announcements."""
+        if not interaction.user.guild_permissions.administrator and not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message(
+                "Only administrators can manage announcement roles.",
+                ephemeral=True,
+            )
+            return
+
+        async with self.config.guild(interaction.guild).mod_roles() as mod_roles:
+            if role.id not in mod_roles:
+                await interaction.response.send_message(
+                    f"{role.mention} is not in the announcement roles list.",
+                    ephemeral=True,
+                )
+                return
+            mod_roles.remove(role.id)
+
+        await interaction.response.send_message(
+            f"{role.mention} can no longer schedule announcements.",
+            ephemeral=True,
+        )
+
+    @announceset.command(name="view", description="View current announcement settings")
+    async def announceset_view(self, interaction: discord.Interaction):
+        """View current announcement settings."""
+        if not await self.is_authorized(interaction):
+            await interaction.response.send_message(
+                "You don't have permission to view settings.",
+                ephemeral=True,
+            )
+            return
+
+        config = await self.config.guild(interaction.guild).all()
+
+        # Build role list
+        role_mentions = []
+        for role_id in config["mod_roles"]:
+            role = interaction.guild.get_role(role_id)
+            if role:
+                role_mentions.append(role.mention)
+        roles_str = ", ".join(role_mentions) if role_mentions else "None (admins only)"
+
+        scheduled_count = len(config["scheduled"])
+        history_count = len(config["history"])
+
+        await interaction.response.send_message(
+            f"**Announcement Settings**\n\n"
+            f"**Allowed Roles:** {roles_str}\n"
+            f"**Pending Announcements:** {scheduled_count}\n"
+            f"**History Entries:** {history_count} / {config['max_history']}",
+            ephemeral=True,
+        )

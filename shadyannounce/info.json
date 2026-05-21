@@ -1,0 +1,12 @@
+{
+    "author": ["ShadyTidus"],
+    "description": "Schedule announcements to channels with timezone-aware scheduling, preview/edit workflow, and role-based permissions.",
+    "install_msg": "ShadyAnnounce cog installed. Use `/mytime` to set your timezone, then `/announce` to schedule posts.\n\nFeatures:\n- Personal timezone settings\n- Preview before scheduling\n- Edit/cancel workflow\n- Role-based permissions",
+    "short": "Schedule announcements with timezone support",
+    "name": "ShadyAnnounce",
+    "tags": ["announcements", "scheduling", "timezone", "posts", "automation"],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores user timezone preferences, scheduled announcement content, and posting history.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0]
+}
