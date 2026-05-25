@@ -683,8 +683,70 @@ class TimestampModal(Modal):
             ephemeral=True,
         )
 
+        # Auto-delete confirmation after 5 seconds
+        async def delete_later():
+            await asyncio.sleep(5)
+            try:
+                await interaction.delete_original_response()
+            except discord.NotFound:
+                pass
+
+        asyncio.create_task(delete_later())
+
         # Refresh the parent preview
         await self.parent_view.refresh_preview(interaction)
+
+
+class MentionSelectView(View):
+    """View with buttons for selecting from multiple mention matches."""
+
+    def __init__(self, parent_view: "PreviewView", matches: list):
+        super().__init__(timeout=30)
+        self.parent_view = parent_view
+
+        for match in matches[:5]:  # Max 5 buttons
+            if isinstance(match, discord.Role):
+                btn = Button(
+                    label=f"Role: {match.name[:20]}",
+                    style=discord.ButtonStyle.primary,
+                )
+                btn.callback = self._make_callback(match, "role")
+            else:  # Member
+                btn = Button(
+                    label=f"User: {match.display_name[:20]}",
+                    style=discord.ButtonStyle.secondary,
+                )
+                btn.callback = self._make_callback(match, "user")
+            self.add_item(btn)
+
+    def _make_callback(self, entity: Union[discord.Role, discord.Member], entity_type: str):
+        async def callback(interaction: discord.Interaction):
+            mention = entity.mention
+
+            # Insert mention using placeholder logic
+            if entity_type == "role":
+                if "(role)" in self.parent_view.content:
+                    self.parent_view.content = self.parent_view.content.replace("(role)", mention, 1)
+                else:
+                    self.parent_view.content += f"\n{mention}"
+            else:
+                if "(user)" in self.parent_view.content:
+                    self.parent_view.content = self.parent_view.content.replace("(user)", mention, 1)
+                else:
+                    self.parent_view.content += f"\n{mention}"
+
+            # Delete this selection message
+            await interaction.response.defer()
+            try:
+                await interaction.delete_original_response()
+            except discord.NotFound:
+                pass
+
+            # Refresh the parent preview
+            await self.parent_view.refresh_preview(interaction)
+            self.stop()
+
+        return callback
 
 
 class MentionModal(Modal):
@@ -721,6 +783,17 @@ class MentionModal(Modal):
                 f"Role mention inserted: {role.mention}",
                 ephemeral=True,
             )
+
+            # Auto-delete confirmation after 5 seconds
+            async def delete_later():
+                await asyncio.sleep(5)
+                try:
+                    await interaction.delete_original_response()
+                except discord.NotFound:
+                    pass
+
+            asyncio.create_task(delete_later())
+
             await self.parent_view.refresh_preview(interaction)
             return
 
@@ -739,6 +812,17 @@ class MentionModal(Modal):
                 f"User mention inserted: {member.mention}",
                 ephemeral=True,
             )
+
+            # Auto-delete confirmation after 5 seconds
+            async def delete_later():
+                await asyncio.sleep(5)
+                try:
+                    await interaction.delete_original_response()
+                except discord.NotFound:
+                    pass
+
+            asyncio.create_task(delete_later())
+
             await self.parent_view.refresh_preview(interaction)
             return
 
@@ -755,15 +839,11 @@ class MentionModal(Modal):
         ][:5]
 
         if partial_roles or partial_members:
-            suggestions = []
-            for r in partial_roles:
-                suggestions.append(f"Role: `{r.name}`")
-            for m in partial_members:
-                suggestions.append(f"User: `{m.display_name}` ({m.name})")
-
+            matches = partial_roles + partial_members
+            view = MentionSelectView(self.parent_view, matches)
             await interaction.response.send_message(
-                f"No exact match for `{self.name_input.value}`. Did you mean:\n" +
-                "\n".join(suggestions),
+                f"Multiple matches for `{self.name_input.value}`. Select one:",
+                view=view,
                 ephemeral=True,
             )
         else:
