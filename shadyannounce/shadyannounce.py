@@ -369,82 +369,83 @@ class AnnounceModal(Modal):
         self.add_item(self.content_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        date_str = self.date_input.value
-        time_str = self.time_input.value
-        content = self.content_input.value
-
-        # Parse the date
-        parsed_date = parse_date_input(date_str, self.user_tz)
-        if not parsed_date:
-            await interaction.response.send_message(
-                "Could not parse the date. Use formats like:\n"
-                "- `5/25` (month/day)\n"
-                "- `May 25` or `Jan 15`",
-                ephemeral=True,
-            )
-            return
-
-        # Parse the time
-        parsed_time = parse_time_input(time_str)
-        if not parsed_time:
-            await interaction.response.send_message(
-                "Could not parse the time. Use formats like:\n"
-                "- `2:00 pm` or `2:30pm`\n"
-                "- `2pm` or `14:00`",
-                ephemeral=True,
-            )
-            return
-
-        hour, minute = parsed_time
-
-        # Combine date and time
         try:
-            scheduled_dt = parsed_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        except ValueError as e:
-            await interaction.response.send_message(
-                f"Invalid date/time: {e}",
-                ephemeral=True,
-            )
-            return
+            date_str = self.date_input.value
+            time_str = self.time_input.value
+            content = self.content_input.value
 
-        # Check if in the future
-        now = datetime.now(self.user_tz)
-        if scheduled_dt <= now:
-            # If same day but time passed, bump to next year
-            scheduled_dt = scheduled_dt.replace(year=scheduled_dt.year + 1)
-            if scheduled_dt <= now:
+            # Parse the date
+            parsed_date = parse_date_input(date_str, self.user_tz)
+            if not parsed_date:
                 await interaction.response.send_message(
-                    "The scheduled time must be in the future.",
+                    "Could not parse the date. Use formats like:\n"
+                    "- `5/25` (month/day)\n"
+                    "- `May 25` or `Jan 15`",
                     ephemeral=True,
                 )
                 return
 
-        # Convert to UTC for storage
-        scheduled_utc = scheduled_dt.astimezone(timezone.utc)
-        unix_ts = int(scheduled_utc.timestamp())
+            # Parse the time
+            parsed_time = parse_time_input(time_str)
+            if not parsed_time:
+                await interaction.response.send_message(
+                    "Could not parse the time. Use formats like:\n"
+                    "- `2:00 pm` or `2:30pm`\n"
+                    "- `2pm` or `14:00`",
+                    ephemeral=True,
+                )
+                return
 
-        # Format combined time string for edit flow
-        combined_time_str = f"{date_str} {time_str}"
+            hour, minute = parsed_time
 
-        # Show preview
-        view = PreviewView(
-            cog=self.cog,
-            channel=self.channel,
-            content=content,
-            scheduled_utc=scheduled_utc,
-            user_tz=self.user_tz,
-            time_str=combined_time_str,
-            user=interaction.user,
-        )
+            # Combine date and time
+            scheduled_dt = parsed_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-        await interaction.response.send_message(
-            f"**Preview of Scheduled Announcement**\n\n"
-            f"**Channel:** {self.channel.mention}\n"
-            f"**Scheduled for:** <t:{unix_ts}:F> (<t:{unix_ts}:R>)\n\n"
-            f"**Content:**\n{content}",
-            view=view,
-            ephemeral=True,
-        )
+            # Check if in the future
+            now = datetime.now(self.user_tz)
+            if scheduled_dt <= now:
+                # If same day but time passed, bump to next year
+                scheduled_dt = scheduled_dt.replace(year=scheduled_dt.year + 1)
+                if scheduled_dt <= now:
+                    await interaction.response.send_message(
+                        "The scheduled time must be in the future.",
+                        ephemeral=True,
+                    )
+                    return
+
+            # Convert to UTC for storage
+            scheduled_utc = scheduled_dt.astimezone(timezone.utc)
+            unix_ts = int(scheduled_utc.timestamp())
+
+            # Format combined time string for edit flow
+            combined_time_str = f"{date_str} {time_str}"
+
+            # Show preview
+            view = PreviewView(
+                cog=self.cog,
+                channel=self.channel,
+                content=content,
+                scheduled_utc=scheduled_utc,
+                user_tz=self.user_tz,
+                time_str=combined_time_str,
+                user=interaction.user,
+            )
+
+            await interaction.response.send_message(
+                f"**Preview of Scheduled Announcement**\n\n"
+                f"**Channel:** {self.channel.mention}\n"
+                f"**Scheduled for:** <t:{unix_ts}:F> (<t:{unix_ts}:R>)\n\n"
+                f"**Content:**\n{content}",
+                view=view,
+                ephemeral=True,
+            )
+        except Exception as e:
+            log.exception(f"Error in AnnounceModal.on_submit: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"An error occurred: {e}",
+                    ephemeral=True,
+                )
 
 
 class PreviewView(View):
