@@ -551,7 +551,7 @@ class PreviewView(View):
         modal = TimestampModal(parent_view=self, user_tz=self.user_tz)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Add Mention", style=discord.ButtonStyle.secondary, emoji="📣", row=1)
+    @discord.ui.button(label="Add Mention", style=discord.ButtonStyle.secondary, row=1)
     async def add_mention_button(self, interaction: discord.Interaction, button: Button):
         """Open mention picker and insert into content."""
         view = MentionPickerView(
