@@ -7,8 +7,9 @@ Features preview/edit workflow before final confirmation.
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import List, Optional
+import re
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional, Union
 from zoneinfo import ZoneInfo
 
 import discord
@@ -57,7 +58,60 @@ def parse_datetime(text: str, user_tz: ZoneInfo) -> Optional[datetime]:
     - 01/15/2024 2:30 PM
     - 15-01-2024 14:30
     - Jan 15, 2024 2:30 PM
+    - tomorrow 3pm
+    - in 2 hours
     """
+    text = text.strip().lower()
+    now = datetime.now(user_tz)
+
+    # Natural language: "in X hours/minutes/days"
+    in_match = re.match(r"in\s+(\d+)\s*(hour|hr|minute|min|day)s?", text, re.IGNORECASE)
+    if in_match:
+        amount = int(in_match.group(1))
+        unit = in_match.group(2).lower()
+        if unit in ("hour", "hr"):
+            return now + timedelta(hours=amount)
+        elif unit in ("minute", "min"):
+            return now + timedelta(minutes=amount)
+        elif unit == "day":
+            return now + timedelta(days=amount)
+
+    # Natural language: "tomorrow Xpm/am" or "tomorrow X:XX pm/am"
+    tomorrow_match = re.match(
+        r"tomorrow\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text, re.IGNORECASE
+    )
+    if tomorrow_match:
+        hour = int(tomorrow_match.group(1))
+        minute = int(tomorrow_match.group(2)) if tomorrow_match.group(2) else 0
+        ampm = tomorrow_match.group(3)
+        if ampm:
+            ampm = ampm.lower()
+            if ampm == "pm" and hour != 12:
+                hour += 12
+            elif ampm == "am" and hour == 12:
+                hour = 0
+        tomorrow = now + timedelta(days=1)
+        return tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    # Natural language: "today Xpm/am" or just "Xpm"
+    today_match = re.match(
+        r"(?:today\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text, re.IGNORECASE
+    )
+    if today_match:
+        hour = int(today_match.group(1))
+        minute = int(today_match.group(2)) if today_match.group(2) else 0
+        ampm = today_match.group(3).lower()
+        if ampm == "pm" and hour != 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
+        result = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        # If time already passed today, assume tomorrow
+        if result <= now:
+            result += timedelta(days=1)
+        return result
+
+    # Standard formats
     formats = [
         "%Y-%m-%d %H:%M",
         "%Y-%m-%d %I:%M %p",
@@ -71,19 +125,393 @@ def parse_datetime(text: str, user_tz: ZoneInfo) -> Optional[datetime]:
         "%b %d, %Y %I:%M %p",
         "%B %d, %Y %H:%M",
         "%B %d, %Y %I:%M %p",
+        "%b %d %H:%M",
+        "%b %d %I:%M %p",
+        "%b %d %I%p",
     ]
 
-    text = text.strip()
+    original_text = text
     for fmt in formats:
         try:
-            dt = datetime.strptime(text, fmt)
+            dt = datetime.strptime(original_text, fmt)
+            # If year not in format, use current year (or next if past)
+            if "%Y" not in fmt:
+                dt = dt.replace(year=now.year)
+                if dt.replace(tzinfo=user_tz) < now:
+                    dt = dt.replace(year=now.year + 1)
             return dt.replace(tzinfo=user_tz)
         except ValueError:
             continue
     return None
 
 
+def parse_time_tags(content: str, user_tz: ZoneInfo) -> str:
+    """Convert @time(...) tags to Discord timestamps."""
+    pattern = r"@time\(([^)]+)\)"
+
+    def replace_match(match):
+        time_str = match.group(1)
+        dt = parse_datetime(time_str, user_tz)
+        if dt:
+            unix_ts = int(dt.timestamp())
+            return f"<t:{unix_ts}:F>"
+        return match.group(0)  # Leave unchanged if can't parse
+
+    return re.sub(pattern, replace_match, content)
+
+
+def parse_mentions(content: str, guild: discord.Guild) -> str:
+    """Convert @RoleName and @Username to Discord mention format."""
+    # Find @SomeWord patterns (not already in <@...> format)
+    # This regex matches @word but not <@...> or <@&...>
+    pattern = r"(?<!<)@(\w+)"
+
+    def replace_match(match):
+        name = match.group(1)
+        if name.lower() in ("everyone", "here"):
+            return match.group(0)  # Leave @everyone/@here as-is
+
+        # Try to find role by name (case-insensitive)
+        role = discord.utils.find(lambda r: r.name.lower() == name.lower(), guild.roles)
+        if role:
+            return role.mention
+
+        # Try to find member by name/display_name
+        member = discord.utils.find(
+            lambda m: m.name.lower() == name.lower()
+            or m.display_name.lower() == name.lower(),
+            guild.members,
+        )
+        if member:
+            return member.mention
+
+        return match.group(0)  # Leave unchanged if not found
+
+    return re.sub(pattern, replace_match, content)
+
+
+# ==================== CONSTANTS ====================
+
+MONTHS = [
+    ("1", "January"),
+    ("2", "February"),
+    ("3", "March"),
+    ("4", "April"),
+    ("5", "May"),
+    ("6", "June"),
+    ("7", "July"),
+    ("8", "August"),
+    ("9", "September"),
+    ("10", "October"),
+    ("11", "November"),
+    ("12", "December"),
+]
+
+MINUTES_5MIN = [
+    ("0", "00"),
+    ("5", "05"),
+    ("10", "10"),
+    ("15", "15"),
+    ("20", "20"),
+    ("25", "25"),
+    ("30", "30"),
+    ("35", "35"),
+    ("40", "40"),
+    ("45", "45"),
+    ("50", "50"),
+    ("55", "55"),
+]
+
+
 # ==================== UI COMPONENTS ====================
+
+
+class MonthSelect(Select):
+    """Dropdown for selecting month."""
+
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=label, value=value) for value, label in MONTHS
+        ]
+        super().__init__(
+            placeholder="Month",
+            options=options,
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.month = int(self.values[0])
+        await interaction.response.defer()
+
+
+class DaySelect(Select):
+    """Dropdown for selecting day."""
+
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=str(d), value=str(d)) for d in range(1, 32)
+        ]
+        super().__init__(
+            placeholder="Day",
+            options=options[:25],  # Discord limit is 25 options
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.day = int(self.values[0])
+        await interaction.response.defer()
+
+
+class DaySelectExtended(Select):
+    """Dropdown for days 26-31."""
+
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=str(d), value=str(d)) for d in range(26, 32)
+        ]
+        super().__init__(
+            placeholder="Day (26-31)",
+            options=options,
+            min_values=1,
+            max_values=1,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.day = int(self.values[0])
+        await interaction.response.defer()
+
+
+class HourSelect(Select):
+    """Dropdown for selecting hour (1-12)."""
+
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=str(h), value=str(h)) for h in range(1, 13)
+        ]
+        super().__init__(
+            placeholder="Hour",
+            options=options,
+            min_values=1,
+            max_values=1,
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.hour = int(self.values[0])
+        await interaction.response.defer()
+
+
+class MinuteSelect(Select):
+    """Dropdown for selecting minute (5-min increments)."""
+
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=label, value=value) for value, label in MINUTES_5MIN
+        ]
+        super().__init__(
+            placeholder="Minute",
+            options=options,
+            min_values=1,
+            max_values=1,
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.minute = int(self.values[0])
+        await interaction.response.defer()
+
+
+class AmPmSelect(Select):
+    """Dropdown for selecting AM/PM."""
+
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="AM", value="AM"),
+            discord.SelectOption(label="PM", value="PM"),
+        ]
+        super().__init__(
+            placeholder="AM/PM",
+            options=options,
+            min_values=1,
+            max_values=1,
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.ampm = self.values[0]
+        await interaction.response.defer()
+
+
+class DateTimeSelectView(View):
+    """View with dropdowns for selecting date and time."""
+
+    def __init__(
+        self,
+        cog: "ShadyAnnounce",
+        channel: Union[discord.TextChannel, discord.Thread],
+        user_tz: ZoneInfo,
+        prefill_content: str = "",
+    ):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.channel = channel
+        self.user_tz = user_tz
+        self.prefill_content = prefill_content
+        self.month: Optional[int] = None
+        self.day: Optional[int] = None
+        self.hour: Optional[int] = None
+        self.minute: Optional[int] = None
+        self.ampm: Optional[str] = None
+
+        # Add select components
+        self.add_item(MonthSelect())
+        self.add_item(DaySelect())
+        self.add_item(HourSelect())
+        self.add_item(MinuteSelect())
+        self.add_item(AmPmSelect())
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, row=3)
+    async def next_button(self, interaction: discord.Interaction, button: Button):
+        # Validate all fields are selected
+        missing = []
+        if self.month is None:
+            missing.append("month")
+        if self.day is None:
+            missing.append("day")
+        if self.hour is None:
+            missing.append("hour")
+        if self.minute is None:
+            missing.append("minute")
+        if self.ampm is None:
+            missing.append("AM/PM")
+
+        if missing:
+            await interaction.response.send_message(
+                f"Please select: {', '.join(missing)}", ephemeral=True
+            )
+            return
+
+        # Build datetime
+        now = datetime.now(self.user_tz)
+        year = now.year
+
+        # Convert 12-hour to 24-hour
+        hour_24 = self.hour
+        if self.ampm == "PM" and self.hour != 12:
+            hour_24 += 12
+        elif self.ampm == "AM" and self.hour == 12:
+            hour_24 = 0
+
+        try:
+            scheduled_dt = datetime(
+                year=year,
+                month=self.month,
+                day=self.day,
+                hour=hour_24,
+                minute=self.minute,
+                tzinfo=self.user_tz,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(
+                f"Invalid date: {e}", ephemeral=True
+            )
+            return
+
+        # If date is in the past, bump to next year
+        if scheduled_dt <= now:
+            try:
+                scheduled_dt = scheduled_dt.replace(year=year + 1)
+            except ValueError:
+                # Feb 29 on non-leap year
+                await interaction.response.send_message(
+                    "Invalid date for next year (e.g., Feb 29 on non-leap year).",
+                    ephemeral=True,
+                )
+                return
+
+        # Format time string for the modal
+        time_str = scheduled_dt.strftime("%b %d, %Y %I:%M %p")
+
+        # Show content-only modal
+        modal = ContentOnlyModal(
+            cog=self.cog,
+            channel=self.channel,
+            user_tz=self.user_tz,
+            scheduled_dt=scheduled_dt,
+            time_str=time_str,
+            prefill_content=self.prefill_content,
+        )
+        await interaction.response.send_modal(modal)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=3)
+    async def cancel_button(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.edit_message(
+            content="Announcement scheduling cancelled.", view=None
+        )
+        self.stop()
+
+
+class ContentOnlyModal(Modal):
+    """Modal for entering only the announcement content (date already selected)."""
+
+    def __init__(
+        self,
+        cog: "ShadyAnnounce",
+        channel: Union[discord.TextChannel, discord.Thread],
+        user_tz: ZoneInfo,
+        scheduled_dt: datetime,
+        time_str: str,
+        prefill_content: str = "",
+    ):
+        super().__init__(title="Announcement Content")
+        self.cog = cog
+        self.channel = channel
+        self.user_tz = user_tz
+        self.scheduled_dt = scheduled_dt
+        self.time_str = time_str
+
+        self.content_input = TextInput(
+            label="Announcement Content",
+            placeholder="Supports **bold**, @RoleName, @Username, and @time(Jan 15 3pm) for timestamps",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=2000,
+            default=prefill_content,
+        )
+        self.add_item(self.content_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        content = self.content_input.value
+
+        # Convert to UTC for storage
+        scheduled_utc = self.scheduled_dt.astimezone(timezone.utc)
+        unix_ts = int(scheduled_utc.timestamp())
+
+        # Show preview
+        view = PreviewView(
+            cog=self.cog,
+            channel=self.channel,
+            content=content,
+            scheduled_utc=scheduled_utc,
+            user_tz=self.user_tz,
+            time_str=self.time_str,
+            user=interaction.user,
+        )
+
+        await interaction.response.send_message(
+            f"**Preview of Scheduled Announcement**\n\n"
+            f"**Channel:** {self.channel.mention}\n"
+            f"**Scheduled for:** <t:{unix_ts}:F> (<t:{unix_ts}:R>)\n\n"
+            f"**Content:**\n{content}",
+            view=view,
+            ephemeral=True,
+        )
 
 
 class TimezoneSelect(Select):
@@ -123,12 +551,12 @@ class TimezoneView(View):
 
 
 class AnnounceModal(Modal):
-    """Modal for entering announcement details."""
+    """Modal for entering announcement details (legacy, used for Edit flow)."""
 
     def __init__(
         self,
         cog: "ShadyAnnounce",
-        channel: discord.TextChannel,
+        channel: Union[discord.TextChannel, discord.Thread],
         user_tz: ZoneInfo,
         prefill_time: str = "",
         prefill_content: str = "",
@@ -140,14 +568,14 @@ class AnnounceModal(Modal):
 
         self.datetime_input = TextInput(
             label="Date & Time (in your timezone)",
-            placeholder="e.g. 2024-01-15 14:30 or Jan 15, 2024 2:30 PM",
+            placeholder="e.g. Jan 15 3pm, tomorrow 6pm, in 2 hours",
             required=True,
             max_length=50,
             default=prefill_time,
         )
         self.content_input = TextInput(
             label="Announcement Content",
-            placeholder="Supports Discord markdown: **bold**, *italic*, ||spoiler||, etc.",
+            placeholder="Supports **bold**, @RoleName, @Username, and @time(Jan 15 3pm) for timestamps",
             style=discord.TextStyle.paragraph,
             required=True,
             max_length=2000,
@@ -165,9 +593,9 @@ class AnnounceModal(Modal):
         if not scheduled_dt:
             await interaction.response.send_message(
                 "Could not parse the date/time. Please use a format like:\n"
-                "- `2024-01-15 14:30`\n"
                 "- `Jan 15, 2024 2:30 PM`\n"
-                "- `01/15/2024 14:30`",
+                "- `tomorrow 3pm`\n"
+                "- `in 2 hours`",
                 ephemeral=True,
             )
             return
@@ -212,7 +640,7 @@ class PreviewView(View):
     def __init__(
         self,
         cog: "ShadyAnnounce",
-        channel: discord.TextChannel,
+        channel: Union[discord.TextChannel, discord.Thread],
         content: str,
         scheduled_utc: datetime,
         user_tz: ZoneInfo,
@@ -228,7 +656,7 @@ class PreviewView(View):
         self.time_str = time_str
         self.user = user
 
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="\u2705")
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="\u2705", row=0)
     async def confirm_button(self, interaction: discord.Interaction, button: Button):
         # Double-check it's still in the future
         if self.scheduled_utc <= datetime.now(timezone.utc):
@@ -238,6 +666,10 @@ class PreviewView(View):
             )
             return
 
+        # Process @time(...) tags and @mentions before saving
+        processed_content = parse_time_tags(self.content, self.user_tz)
+        processed_content = parse_mentions(processed_content, interaction.guild)
+
         # Save to config
         async with self.cog.config.guild(interaction.guild).scheduled() as scheduled:
             # Generate ID
@@ -245,7 +677,7 @@ class PreviewView(View):
             announcement = {
                 "id": new_id,
                 "channel_id": self.channel.id,
-                "content": self.content,
+                "content": processed_content,
                 "scheduled_for": self.scheduled_utc.isoformat(),
                 "created_by": interaction.user.id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -259,7 +691,7 @@ class PreviewView(View):
         )
         self.stop()
 
-    @discord.ui.button(label="Edit", style=discord.ButtonStyle.primary, emoji="\u270f\ufe0f")
+    @discord.ui.button(label="Edit", style=discord.ButtonStyle.primary, emoji="\u270f\ufe0f", row=0)
     async def edit_button(self, interaction: discord.Interaction, button: Button):
         modal = AnnounceModal(
             cog=self.cog,
@@ -269,13 +701,294 @@ class PreviewView(View):
             prefill_content=self.content,
         )
         await interaction.response.send_modal(modal)
+        # Delete the preview message after modal is shown
+        try:
+            await interaction.message.delete()
+        except discord.NotFound:
+            pass
         self.stop()
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="\u274c")
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="\u274c", row=0)
     async def cancel_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.edit_message(
             content="Announcement cancelled.",
             view=None,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Add Timestamp", style=discord.ButtonStyle.secondary, emoji="🕐", row=1)
+    async def add_timestamp_button(self, interaction: discord.Interaction, button: Button):
+        """Open timestamp picker and insert into content."""
+        view = TimestampPickerView(
+            cog=self.cog,
+            parent_view=self,
+            user_tz=self.user_tz,
+        )
+        await interaction.response.send_message(
+            "Select a date/time to insert as a timestamp:",
+            view=view,
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Add Mention", style=discord.ButtonStyle.secondary, emoji="@", row=1)
+    async def add_mention_button(self, interaction: discord.Interaction, button: Button):
+        """Open mention picker and insert into content."""
+        view = MentionPickerView(
+            cog=self.cog,
+            parent_view=self,
+            guild=interaction.guild,
+        )
+        await interaction.response.send_message(
+            "Select what to mention:",
+            view=view,
+            ephemeral=True,
+        )
+
+    async def refresh_preview(self, interaction: discord.Interaction):
+        """Refresh the preview message with updated content."""
+        unix_ts = int(self.scheduled_utc.timestamp())
+        try:
+            # Find the original preview message and update it
+            # We need the original interaction's message
+            await interaction.message.edit(
+                content=f"**Preview of Scheduled Announcement**\n\n"
+                f"**Channel:** {self.channel.mention}\n"
+                f"**Scheduled for:** <t:{unix_ts}:F> (<t:{unix_ts}:R>)\n\n"
+                f"**Content:**\n{self.content}",
+            )
+        except Exception:
+            pass
+
+
+class TimestampPickerView(View):
+    """View for picking a timestamp to insert."""
+
+    def __init__(
+        self,
+        cog: "ShadyAnnounce",
+        parent_view: PreviewView,
+        user_tz: ZoneInfo,
+    ):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.parent_view = parent_view
+        self.user_tz = user_tz
+        self.month: Optional[int] = None
+        self.day: Optional[int] = None
+        self.hour: Optional[int] = None
+        self.minute: Optional[int] = None
+        self.ampm: Optional[str] = None
+
+        self.add_item(MonthSelect())
+        self.add_item(DaySelect())
+        self.add_item(HourSelect())
+        self.add_item(MinuteSelect())
+        self.add_item(AmPmSelect())
+
+    @discord.ui.button(label="Insert", style=discord.ButtonStyle.primary, row=3)
+    async def insert_button(self, interaction: discord.Interaction, button: Button):
+        # Validate all fields
+        missing = []
+        if self.month is None:
+            missing.append("month")
+        if self.day is None:
+            missing.append("day")
+        if self.hour is None:
+            missing.append("hour")
+        if self.minute is None:
+            missing.append("minute")
+        if self.ampm is None:
+            missing.append("AM/PM")
+
+        if missing:
+            await interaction.response.send_message(
+                f"Please select: {', '.join(missing)}", ephemeral=True
+            )
+            return
+
+        # Build datetime
+        now = datetime.now(self.user_tz)
+        year = now.year
+
+        hour_24 = self.hour
+        if self.ampm == "PM" and self.hour != 12:
+            hour_24 += 12
+        elif self.ampm == "AM" and self.hour == 12:
+            hour_24 = 0
+
+        try:
+            dt = datetime(
+                year=year,
+                month=self.month,
+                day=self.day,
+                hour=hour_24,
+                minute=self.minute,
+                tzinfo=self.user_tz,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(
+                f"Invalid date: {e}", ephemeral=True
+            )
+            return
+
+        # If in past, bump to next year
+        if dt <= now:
+            try:
+                dt = dt.replace(year=year + 1)
+            except ValueError:
+                await interaction.response.send_message(
+                    "Invalid date for next year.", ephemeral=True
+                )
+                return
+
+        unix_ts = int(dt.timestamp())
+        timestamp_code = f"<t:{unix_ts}:F>"
+
+        # Append to parent content
+        self.parent_view.content += f" {timestamp_code}"
+
+        await interaction.response.edit_message(
+            content=f"Timestamp inserted: {timestamp_code}",
+            view=None,
+        )
+
+        # Refresh the parent preview
+        await self.parent_view.refresh_preview(interaction)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=3)
+    async def cancel_button(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.edit_message(
+            content="Timestamp insertion cancelled.", view=None
+        )
+        self.stop()
+
+
+class MentionTypeSelect(Select):
+    """Dropdown for selecting mention type (Role or User)."""
+
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Role", value="role", emoji="👥"),
+            discord.SelectOption(label="User", value="user", emoji="👤"),
+        ]
+        super().__init__(
+            placeholder="Select type...",
+            options=options,
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.mention_type = self.values[0]
+        # Update the entity select based on type
+        await self.view.update_entity_select(interaction)
+
+
+class MentionPickerView(View):
+    """View for picking a role or user to mention."""
+
+    def __init__(
+        self,
+        cog: "ShadyAnnounce",
+        parent_view: PreviewView,
+        guild: discord.Guild,
+    ):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.parent_view = parent_view
+        self.guild = guild
+        self.mention_type: Optional[str] = None
+        self.selected_entity: Optional[Union[discord.Role, discord.Member]] = None
+        self.entity_select: Optional[Select] = None
+
+        self.add_item(MentionTypeSelect())
+
+    async def update_entity_select(self, interaction: discord.Interaction):
+        """Update the entity select dropdown based on mention type."""
+        # Remove old entity select if exists
+        if self.entity_select:
+            self.remove_item(self.entity_select)
+
+        if self.mention_type == "role":
+            # Get mentionable roles (not @everyone, limited to 25)
+            roles = [r for r in self.guild.roles if r.name != "@everyone"][:25]
+            options = [
+                discord.SelectOption(label=r.name[:100], value=str(r.id))
+                for r in roles
+            ]
+            if not options:
+                await interaction.response.send_message(
+                    "No roles available.", ephemeral=True
+                )
+                return
+            self.entity_select = Select(
+                placeholder="Select a role...",
+                options=options,
+                min_values=1,
+                max_values=1,
+                row=1,
+            )
+        else:
+            # Get members (limited to 25 most recent)
+            members = list(self.guild.members)[:25]
+            options = [
+                discord.SelectOption(
+                    label=m.display_name[:100], value=str(m.id), description=m.name[:100]
+                )
+                for m in members
+            ]
+            if not options:
+                await interaction.response.send_message(
+                    "No members available.", ephemeral=True
+                )
+                return
+            self.entity_select = Select(
+                placeholder="Select a user...",
+                options=options,
+                min_values=1,
+                max_values=1,
+                row=1,
+            )
+
+        # Set up callback
+        async def entity_callback(inter: discord.Interaction):
+            entity_id = int(self.entity_select.values[0])
+            if self.mention_type == "role":
+                self.selected_entity = self.guild.get_role(entity_id)
+            else:
+                self.selected_entity = self.guild.get_member(entity_id)
+            await inter.response.defer()
+
+        self.entity_select.callback = entity_callback
+        self.add_item(self.entity_select)
+
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Insert", style=discord.ButtonStyle.primary, row=2)
+    async def insert_button(self, interaction: discord.Interaction, button: Button):
+        if not self.selected_entity:
+            await interaction.response.send_message(
+                "Please select a role or user first.", ephemeral=True
+            )
+            return
+
+        mention = self.selected_entity.mention
+        self.parent_view.content += f" {mention}"
+
+        await interaction.response.edit_message(
+            content=f"Mention inserted: {mention}",
+            view=None,
+        )
+
+        await self.parent_view.refresh_preview(interaction)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=2)
+    async def cancel_button(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.edit_message(
+            content="Mention insertion cancelled.", view=None
         )
         self.stop()
 
@@ -350,6 +1063,16 @@ class ShadyAnnounce(commands.Cog):
     async def cog_unload(self) -> None:
         if self.announcement_task:
             self.announcement_task.cancel()
+
+    # ==================== HELPERS ====================
+
+    async def _auto_delete(self, interaction: discord.Interaction, delay: float = 10.0):
+        """Delete the original response after a delay."""
+        await asyncio.sleep(delay)
+        try:
+            await interaction.delete_original_response()
+        except discord.NotFound:
+            pass  # Already deleted
 
     # ==================== AUTHORIZATION ====================
 
@@ -467,11 +1190,11 @@ class ShadyAnnounce(commands.Cog):
             )
             return
 
-        # Check bot permissions in channel
+        # Check bot permissions in channel - allow TextChannel and Thread
         channel = interaction.channel
-        if not isinstance(channel, discord.TextChannel):
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             await interaction.response.send_message(
-                "Announcements can only be scheduled for text channels.",
+                "Announcements can only be scheduled for text channels or threads.",
                 ephemeral=True,
             )
             return
@@ -484,8 +1207,20 @@ class ShadyAnnounce(commands.Cog):
             )
             return
 
-        modal = AnnounceModal(cog=self, channel=channel, user_tz=user_tz)
-        await interaction.response.send_modal(modal)
+        # Show date/time selection view
+        view = DateTimeSelectView(cog=self, channel=channel, user_tz=user_tz)
+        now = datetime.now(user_tz)
+        tz_display = next(
+            (label for name, label in COMMON_TIMEZONES if name == user_tz_name),
+            user_tz_name,
+        )
+        await interaction.response.send_message(
+            f"**Schedule Announcement**\n\n"
+            f"Select the date and time for your announcement.\n"
+            f"Your timezone: **{tz_display}** (current time: {now.strftime('%I:%M %p')})",
+            view=view,
+            ephemeral=True,
+        )
 
     @app_commands.command(name="announcelist", description="View pending scheduled announcements")
     @app_commands.guild_only()
@@ -631,6 +1366,7 @@ class ShadyAnnounce(commands.Cog):
                     f"{role.mention} can already schedule announcements.",
                     ephemeral=True,
                 )
+                asyncio.create_task(self._auto_delete(interaction))
                 return
             mod_roles.append(role.id)
 
@@ -638,6 +1374,7 @@ class ShadyAnnounce(commands.Cog):
             f"{role.mention} can now schedule announcements.",
             ephemeral=True,
         )
+        asyncio.create_task(self._auto_delete(interaction))
 
     @announceset.command(name="removerole", description="Remove a role from scheduling announcements")
     @app_commands.describe(role="The role to remove")
@@ -656,6 +1393,7 @@ class ShadyAnnounce(commands.Cog):
                     f"{role.mention} is not in the announcement roles list.",
                     ephemeral=True,
                 )
+                asyncio.create_task(self._auto_delete(interaction))
                 return
             mod_roles.remove(role.id)
 
@@ -663,6 +1401,7 @@ class ShadyAnnounce(commands.Cog):
             f"{role.mention} can no longer schedule announcements.",
             ephemeral=True,
         )
+        asyncio.create_task(self._auto_delete(interaction))
 
     @announceset.command(name="view", description="View current announcement settings")
     async def announceset_view(self, interaction: discord.Interaction):
@@ -694,3 +1433,4 @@ class ShadyAnnounce(commands.Cog):
             f"**History Entries:** {history_count} / {config['max_history']}",
             ephemeral=True,
         )
+        asyncio.create_task(self._auto_delete(interaction))
