@@ -597,6 +597,7 @@ class PreviewView(View):
     async def refresh_preview(self, interaction: discord.Interaction):
         """Refresh the preview message with updated content."""
         if not self.preview_message:
+            log.warning("refresh_preview called but preview_message is None")
             return
         unix_ts = int(self.scheduled_utc.timestamp())
         try:
@@ -610,9 +611,10 @@ class PreviewView(View):
                 f"**Channel:** {self.channel.mention}\n"
                 f"**Scheduled for:** <t:{unix_ts}:F> (<t:{unix_ts}:R>)\n\n"
                 f"**Content:**\n{preview_content}",
+                view=self,  # Re-attach the view to keep buttons working
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log.error(f"Failed to refresh preview: {e}")
 
 
 class TimestampModal(Modal):
