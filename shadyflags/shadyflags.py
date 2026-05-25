@@ -560,10 +560,12 @@ class KnownBadActor:
     """Record of a confirmed bad actor in the network."""
     user_id: int
     added_at: str  # ISO format
-    source: str  # "mod_action", "alt_of_confirmed", "manual"
+    source: str  # "mod_action", "alt_of_confirmed", "manual", "history_scan"
     reason: str
     mod_action_type: Optional[str] = None  # "ban", "kick", etc.
     linked_alts: Optional[List[int]] = None
+    username: Optional[str] = None  # Username at time of action
+    actioned_by: Optional[int] = None  # Moderator who took action
 
 
 def is_bad_actor_action(reason: str) -> bool:
@@ -1410,6 +1412,8 @@ class ShadyFlags(commands.Cog):
         reason: str,
         mod_action_type: str = None,
         linked_alts: List[int] = None,
+        username: str = None,
+        actioned_by: int = None,
         propagate: bool = True
     ):
         """Add a user to the known bad actor network.
@@ -1429,7 +1433,9 @@ class ShadyFlags(commands.Cog):
             source=source,
             reason=reason,
             mod_action_type=mod_action_type,
-            linked_alts=linked_alts or []
+            linked_alts=linked_alts or [],
+            username=username,
+            actioned_by=actioned_by
         )
 
         async with self.config.guild(guild).known_network() as network:
@@ -2385,6 +2391,8 @@ class ShadyFlags(commands.Cog):
             # Scan last 1000 messages in mod log
             scanned = 0
             added = 0
+            skipped_no_keyword = 0
+            skipped_already_exists = 0
             errors = 0
 
             try:
@@ -2396,85 +2404,83 @@ class ShadyFlags(commands.Cog):
                         continue
 
                     try:
-                        # Parse mod log message for ban info
-                        user_id = None
-                        username = None
-                        action_type = None
-                        reason_text = None
-
-                        # Check embeds
+                        # Check each embed in the message
                         for embed in message.embeds:
-                            # Check fields first
-                            for field in embed.fields:
-                                field_lower = field.name.lower()
-                                if any(n in field_lower for n in ["user", "member", "target", "offender"]):
-                                    user_id = user_id or parse_user_id_from_text(field.value)
-                                elif "action" in field_lower or "type" in field_lower:
-                                    action_type = action_type or field.value.lower()
-                                elif "reason" in field_lower:
-                                    reason_text = reason_text or field.value
+                            desc = embed.description or ""
+                            desc_lower = desc.lower()
 
-                            # Check description - handles Jeebs format:
-                            # "username (user_id)\nCase #XXX | Ban 🔨\nReason: ...\nModerator..."
-                            if embed.description:
-                                desc = embed.description
-                                desc_lower = desc.lower()
-
-                                # Extract user ID from description
-                                user_id = user_id or parse_user_id_from_text(desc)
-
-                                # Try to extract username from "username (id)" format
-                                if not username:
-                                    # Match "username (id)" at start of description
-                                    username_match = re.match(r'^([^\n(]+)\s*\(\d{17,20}\)', desc)
-                                    if username_match:
-                                        username = username_match.group(1).strip()
-
-                                # Extract reason from "Reason: ..." line in description
-                                if not reason_text:
-                                    reason_match = re.search(r'Reason:\s*(.+?)(?:\n|Moderator|$)', desc, re.IGNORECASE)
-                                    if reason_match:
-                                        reason_text = reason_match.group(1).strip()
-
-                                # Detect ban action
-                                if "ban" in desc_lower:
-                                    action_type = action_type or "ban"
-                                elif "kick" in desc_lower:
-                                    action_type = action_type or "kick"
-
-                            # Check title for action type
+                            # Must be a ban - check description and title
+                            is_ban = "ban" in desc_lower
                             if embed.title:
-                                title_lower = embed.title.lower()
-                                if "ban" in title_lower:
-                                    action_type = action_type or "ban"
-                                elif "kick" in title_lower:
-                                    action_type = action_type or "kick"
+                                is_ban = is_ban or "ban" in embed.title.lower()
 
-                        # Also try plain text content
-                        if message.content:
-                            user_id = user_id or parse_user_id_from_text(message.content)
+                            if not is_ban:
+                                continue
 
-                        # Must have user ID and be a ban
-                        if not user_id:
-                            continue
+                            # Skip unbans
+                            if "unban" in desc_lower:
+                                continue
 
-                        if action_type != "ban":
-                            continue
+                            # Extract reason - look for "Reason:" line
+                            reason_text = None
+                            reason_match = re.search(r'Reason:\s*([^\n]+)', desc, re.IGNORECASE)
+                            if reason_match:
+                                reason_text = reason_match.group(1).strip()
 
-                        # ONLY add if reason contains spam/scam/bot keywords
-                        # (not all bans - e.g., "trolling" shouldn't be in bot network)
-                        if not reason_text or not is_bad_actor_action(reason_text):
-                            continue
+                            # Also check embed fields for reason
+                            if not reason_text:
+                                for field in embed.fields:
+                                    if "reason" in field.name.lower():
+                                        reason_text = field.value
+                                        break
 
-                        # Check if already in network
-                        existing = await self.is_in_known_network(interaction.guild, user_id)
-                        if not existing:
+                            # Must have reason with bad actor keywords
+                            if not reason_text or not is_bad_actor_action(reason_text):
+                                skipped_no_keyword += 1
+                                continue
+
+                            # Extract user ID from description
+                            user_id = parse_user_id_from_text(desc)
+
+                            # Also check fields for user ID
+                            if not user_id:
+                                for field in embed.fields:
+                                    field_lower = field.name.lower()
+                                    if any(n in field_lower for n in ["user", "member", "target", "offender"]):
+                                        user_id = parse_user_id_from_text(field.value)
+                                        if user_id:
+                                            break
+
+                            if not user_id:
+                                continue
+
+                            # Extract username from "username (id)" format
+                            username = None
+                            username_match = re.match(r'^([^\n(]+)\s*\(\d{17,20}\)', desc)
+                            if username_match:
+                                username = username_match.group(1).strip()
+
+                            # Extract moderator ID if present
+                            mod_id = None
+                            mod_match = re.search(r'Moderator[:\s]*[^\d]*(\d{17,20})', desc, re.IGNORECASE)
+                            if mod_match:
+                                mod_id = int(mod_match.group(1))
+
+                            # Check if already in network
+                            existing = await self.is_in_known_network(interaction.guild, user_id)
+                            if existing:
+                                skipped_already_exists += 1
+                                continue
+
+                            # Add to known network with all captured data
                             await self.add_to_known_network(
                                 interaction.guild,
                                 user_id,
                                 source="history_scan",
                                 reason=reason_text,
-                                mod_action_type=action_type,
+                                mod_action_type="ban",
+                                username=username,
+                                actioned_by=mod_id,
                                 propagate=False  # Don't propagate during bulk scan
                             )
                             added += 1
@@ -2495,7 +2501,9 @@ class ShadyFlags(commands.Cog):
                 color=discord.Color.green()
             )
             embed.add_field(name="Messages Scanned", value=str(scanned), inline=True)
-            embed.add_field(name="Bad Actors Found", value=str(added), inline=True)
+            embed.add_field(name="Bad Actors Added", value=str(added), inline=True)
+            embed.add_field(name="Already in Network", value=str(skipped_already_exists), inline=True)
+            embed.add_field(name="Skipped (No Keywords)", value=str(skipped_no_keyword), inline=True)
             embed.add_field(name="Parse Errors", value=str(errors), inline=True)
 
             if added > 0:
@@ -2505,13 +2513,17 @@ class ShadyFlags(commands.Cog):
                           "New members will now be checked against this data.",
                     inline=False
                 )
+            elif skipped_already_exists > 0:
+                embed.add_field(
+                    name="Note",
+                    value="All matching bans were already in the network.",
+                    inline=False
+                )
             else:
                 embed.add_field(
                     name="Note",
-                    value="No new bad actors found. This could mean:\n"
-                          "• Network already up to date\n"
-                          "• Mod log format not recognized\n"
-                          "• No bans with bot/spam reasons found",
+                    value="No bans with trigger keywords found.\n"
+                          f"Keywords: bot, spam, scam, suspicious, defender, quickaction, etc.",
                     inline=False
                 )
 
