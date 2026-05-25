@@ -420,11 +420,15 @@ class AnnounceModal(Modal):
             # Format combined time string for edit flow
             combined_time_str = f"{date_str} {time_str}"
 
-            # Show preview
+            # Convert content for preview display
+            preview_content = parse_time_tags(content, self.user_tz)
+            preview_content = parse_mentions(preview_content, interaction.guild)
+
+            # Show preview (store original content for editing)
             view = PreviewView(
                 cog=self.cog,
                 channel=self.channel,
-                content=content,
+                content=content,  # Original for editing
                 scheduled_utc=scheduled_utc,
                 user_tz=self.user_tz,
                 time_str=combined_time_str,
@@ -435,7 +439,7 @@ class AnnounceModal(Modal):
                 f"**Preview of Scheduled Announcement**\n\n"
                 f"**Channel:** {self.channel.mention}\n"
                 f"**Scheduled for:** <t:{unix_ts}:F> (<t:{unix_ts}:R>)\n\n"
-                f"**Content:**\n{content}",
+                f"**Content:**\n{preview_content}",
                 view=view,
                 ephemeral=True,
             )
@@ -561,13 +565,16 @@ class PreviewView(View):
         """Refresh the preview message with updated content."""
         unix_ts = int(self.scheduled_utc.timestamp())
         try:
+            # Convert content for preview display
+            preview_content = parse_time_tags(self.content, self.user_tz)
+            preview_content = parse_mentions(preview_content, interaction.guild)
+
             # Find the original preview message and update it
-            # We need the original interaction's message
             await interaction.message.edit(
                 content=f"**Preview of Scheduled Announcement**\n\n"
                 f"**Channel:** {self.channel.mention}\n"
                 f"**Scheduled for:** <t:{unix_ts}:F> (<t:{unix_ts}:R>)\n\n"
-                f"**Content:**\n{self.content}",
+                f"**Content:**\n{preview_content}",
             )
         except Exception:
             pass
