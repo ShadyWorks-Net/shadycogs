@@ -667,8 +667,11 @@ class TimestampModal(Modal):
         unix_ts = int(dt.timestamp())
         timestamp_code = f"<t:{unix_ts}:F>"
 
-        # Append to parent content
-        self.parent_view.content += f" {timestamp_code}"
+        # Replace (time) placeholder or append on new line
+        if "(time)" in self.parent_view.content:
+            self.parent_view.content = self.parent_view.content.replace("(time)", timestamp_code, 1)
+        else:
+            self.parent_view.content += f"\n{timestamp_code}"
 
         await interaction.response.send_message(
             f"Timestamp inserted: {timestamp_code}",
@@ -704,7 +707,11 @@ class MentionModal(Modal):
             self.guild.roles,
         )
         if role:
-            self.parent_view.content += f" {role.mention}"
+            # Replace (role) placeholder or append on new line
+            if "(role)" in self.parent_view.content:
+                self.parent_view.content = self.parent_view.content.replace("(role)", role.mention, 1)
+            else:
+                self.parent_view.content += f"\n{role.mention}"
             await interaction.response.send_message(
                 f"Role mention inserted: {role.mention}",
                 ephemeral=True,
@@ -718,7 +725,11 @@ class MentionModal(Modal):
             self.guild.members,
         )
         if member:
-            self.parent_view.content += f" {member.mention}"
+            # Replace (user) placeholder or append on new line
+            if "(user)" in self.parent_view.content:
+                self.parent_view.content = self.parent_view.content.replace("(user)", member.mention, 1)
+            else:
+                self.parent_view.content += f"\n{member.mention}"
             await interaction.response.send_message(
                 f"User mention inserted: {member.mention}",
                 ephemeral=True,
@@ -897,7 +908,11 @@ class ShadyAnnounce(commands.Cog):
                             channel = None
                     if channel:
                         try:
-                            await channel.send(ann["content"])
+                            # Build message with author prefix (Discord heading)
+                            creator = guild.get_member(ann["created_by"])
+                            creator_mention = creator.mention if creator else f"User {ann['created_by']}"
+                            message = f"# Announcement from {creator_mention}\n\n{ann['content']}"
+                            await channel.send(message)
                             log.info(f"Posted announcement #{ann['id']} to {channel.name}")
                         except discord.Forbidden:
                             log.warning(f"No permission to post in {channel.name}")
