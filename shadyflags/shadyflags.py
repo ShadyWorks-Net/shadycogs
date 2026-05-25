@@ -2265,6 +2265,7 @@ class ShadyFlags(commands.Cog):
         app_commands.Choice(name="Check User", value="check"),
         app_commands.Choice(name="Toggle Auto-Parse", value="toggle"),
         app_commands.Choice(name="Clear All (Reset Network)", value="clearall"),
+        app_commands.Choice(name="Debug Scan (DM Output)", value="debug"),
     ])
     async def flagnetwork_cmd(
         self,
@@ -2749,6 +2750,91 @@ class ShadyFlags(commands.Cog):
                 f"**Bad Actors Removed:** {count}\n"
                 f"ShadyAlts and ML training data also reset."
             )
+
+        elif action == "debug":
+            # Debug scan - send detailed parsing info to DMs
+            mod_log_channel_id = await self.config.guild(interaction.guild).mod_log_channel()
+            if not mod_log_channel_id:
+                await interaction.response.send_message("❌ No mod log channel set!", ephemeral=True)
+                return
+
+            channel = interaction.guild.get_channel(mod_log_channel_id)
+            if not channel:
+                await interaction.response.send_message("❌ Mod log channel not found!", ephemeral=True)
+                return
+
+            await interaction.response.defer(ephemeral=True)
+
+            # Try to DM the user
+            try:
+                dm = await interaction.user.create_dm()
+                await dm.send("🔍 **Debug Scan Starting** - Scanning last 50 messages...")
+            except discord.Forbidden:
+                await interaction.followup.send("❌ Can't DM you. Enable DMs from server members.", ephemeral=True)
+                return
+
+            debug_lines = []
+            bans_found = 0
+            keywords_found = 0
+
+            async for message in channel.history(limit=50):
+                if not message.author.bot:
+                    continue
+
+                for embed in message.embeds:
+                    desc = embed.description or ""
+                    desc_lower = desc.lower()
+
+                    # Check if ban
+                    is_ban = "ban" in desc_lower and "unban" not in desc_lower
+                    if embed.title:
+                        is_ban = is_ban or ("ban" in embed.title.lower() and "unban" not in embed.title.lower())
+
+                    if not is_ban:
+                        continue
+
+                    bans_found += 1
+
+                    # Extract first line
+                    first_line = desc.split('\n')[0] if desc else "(empty)"
+
+                    # Try regex
+                    first_line_match = re.match(r'^([^\n(]+)\s*\((\d{17,20})\)', desc)
+                    if first_line_match:
+                        extracted_name = first_line_match.group(1).strip()
+                        extracted_id = first_line_match.group(2)
+                    else:
+                        extracted_name = "(no match)"
+                        extracted_id = "(no match)"
+
+                    # Extract reason
+                    reason_match = re.search(r'Reason:\s*([^\n]+)', desc, re.IGNORECASE)
+                    reason = reason_match.group(1).strip() if reason_match else "(no reason found)"
+
+                    # Check keywords
+                    has_keyword = is_bad_actor_action(reason) if reason != "(no reason found)" else False
+                    if has_keyword:
+                        keywords_found += 1
+
+                    debug_lines.append(
+                        f"**Ban #{bans_found}** {'✅ HAS KEYWORD' if has_keyword else '❌ no keyword'}\n"
+                        f"First line: `{first_line[:60]}...`\n"
+                        f"Extracted name: `{extracted_name}`\n"
+                        f"Extracted ID: `{extracted_id}`\n"
+                        f"Reason: `{reason[:80]}...`\n"
+                    )
+
+                    # Send in batches to avoid rate limits
+                    if len(debug_lines) >= 5:
+                        await dm.send("\n".join(debug_lines))
+                        debug_lines = []
+
+            # Send remaining
+            if debug_lines:
+                await dm.send("\n".join(debug_lines))
+
+            await dm.send(f"**Summary:** {bans_found} bans found, {keywords_found} with keywords")
+            await interaction.followup.send(f"✅ Debug info sent to your DMs. Found {bans_found} bans, {keywords_found} with keywords.", ephemeral=True)
 
     @app_commands.command(name="flagml", description="ML risk scoring management")
     @app_commands.describe(
