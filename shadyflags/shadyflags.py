@@ -1325,9 +1325,16 @@ class ShadyFlags(commands.Cog):
                     elif "reason" in field_lower:
                         reason = reason or field.value
 
-                # Also check description for user mention
+                # Also check description for user mention and Jeebs format
                 if embed.description:
                     user_id = user_id or parse_user_id_from_text(embed.description)
+
+                    # Extract reason from "Reason: ..." line in description (Jeebs format)
+                    if not reason:
+                        reason_match = re.search(r'Reason:\s*(.+?)(?:\n|Moderator|$)', embed.description, re.IGNORECASE)
+                        if reason_match:
+                            reason = reason_match.group(1).strip()
+
                     # Check description for action keywords
                     desc_lower = embed.description.lower()
                     if "banned" in desc_lower or "ban" in desc_lower:
@@ -2406,7 +2413,7 @@ class ShadyFlags(commands.Cog):
                                     reason_text = reason_text or field.value
 
                             # Check description - handles Jeebs format:
-                            # "username (user_id)\nCase #XXX | Ban 🔨"
+                            # "username (user_id)\nCase #XXX | Ban 🔨\nReason: ...\nModerator..."
                             if embed.description:
                                 desc = embed.description
                                 desc_lower = desc.lower()
@@ -2416,11 +2423,16 @@ class ShadyFlags(commands.Cog):
 
                                 # Try to extract username from "username (id)" format
                                 if not username:
-                                    import re
                                     # Match "username (id)" at start of description
                                     username_match = re.match(r'^([^\n(]+)\s*\(\d{17,20}\)', desc)
                                     if username_match:
                                         username = username_match.group(1).strip()
+
+                                # Extract reason from "Reason: ..." line in description
+                                if not reason_text:
+                                    reason_match = re.search(r'Reason:\s*(.+?)(?:\n|Moderator|$)', desc, re.IGNORECASE)
+                                    if reason_match:
+                                        reason_text = reason_match.group(1).strip()
 
                                 # Detect ban action
                                 if "ban" in desc_lower:
