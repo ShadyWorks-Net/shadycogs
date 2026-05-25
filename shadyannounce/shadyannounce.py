@@ -553,17 +553,9 @@ class PreviewView(View):
 
     @discord.ui.button(label="Add Mention", style=discord.ButtonStyle.secondary, row=1)
     async def add_mention_button(self, interaction: discord.Interaction, button: Button):
-        """Open mention picker and insert into content."""
-        view = MentionPickerView(
-            cog=self.cog,
-            parent_view=self,
-            guild=interaction.guild,
-        )
-        await interaction.response.send_message(
-            "Select what to mention:",
-            view=view,
-            ephemeral=True,
-        )
+        """Open mention search modal."""
+        modal = MentionModal(parent_view=self, guild=interaction.guild)
+        await interaction.response.send_modal(modal)
 
     async def refresh_preview(self, interaction: discord.Interaction):
         """Refresh the preview message with updated content."""
@@ -645,133 +637,82 @@ class TimestampModal(Modal):
         await self.parent_view.refresh_preview(interaction)
 
 
-class MentionTypeSelect(Select):
-    """Dropdown for selecting mention type (Role or User)."""
+class MentionModal(Modal):
+    """Modal for searching and inserting a role or user mention."""
 
-    def __init__(self):
-        options = [
-            discord.SelectOption(label="Role", value="role", emoji="👥"),
-            discord.SelectOption(label="User", value="user", emoji="👤"),
-        ]
-        super().__init__(
-            placeholder="Select type...",
-            options=options,
-            min_values=1,
-            max_values=1,
-            row=0,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        self.view.mention_type = self.values[0]
-        # Update the entity select based on type
-        await self.view.update_entity_select(interaction)
-
-
-class MentionPickerView(View):
-    """View for picking a role or user to mention."""
-
-    def __init__(
-        self,
-        cog: "ShadyAnnounce",
-        parent_view: PreviewView,
-        guild: discord.Guild,
-    ):
-        super().__init__(timeout=120)
-        self.cog = cog
+    def __init__(self, parent_view: "PreviewView", guild: discord.Guild):
+        super().__init__(title="Add Mention")
         self.parent_view = parent_view
         self.guild = guild
-        self.mention_type: Optional[str] = None
-        self.selected_entity: Optional[Union[discord.Role, discord.Member]] = None
-        self.entity_select: Optional[Select] = None
 
-        self.add_item(MentionTypeSelect())
+        self.name_input = TextInput(
+            label="Role or Username",
+            placeholder="Type a role name or username to search",
+            required=True,
+            max_length=100,
+        )
+        self.add_item(self.name_input)
 
-    async def update_entity_select(self, interaction: discord.Interaction):
-        """Update the entity select dropdown based on mention type."""
-        # Remove old entity select if exists
-        if self.entity_select:
-            self.remove_item(self.entity_select)
+    async def on_submit(self, interaction: discord.Interaction):
+        search = self.name_input.value.strip().lower()
 
-        if self.mention_type == "role":
-            # Get mentionable roles (not @everyone, limited to 25)
-            roles = [r for r in self.guild.roles if r.name != "@everyone"][:25]
-            options = [
-                discord.SelectOption(label=r.name[:100], value=str(r.id))
-                for r in roles
-            ]
-            if not options:
-                await interaction.response.send_message(
-                    "No roles available.", ephemeral=True
-                )
-                return
-            self.entity_select = Select(
-                placeholder="Select a role...",
-                options=options,
-                min_values=1,
-                max_values=1,
-                row=1,
-            )
-        else:
-            # Get members (limited to 25 most recent)
-            members = list(self.guild.members)[:25]
-            options = [
-                discord.SelectOption(
-                    label=m.display_name[:100], value=str(m.id), description=m.name[:100]
-                )
-                for m in members
-            ]
-            if not options:
-                await interaction.response.send_message(
-                    "No members available.", ephemeral=True
-                )
-                return
-            self.entity_select = Select(
-                placeholder="Select a user...",
-                options=options,
-                min_values=1,
-                max_values=1,
-                row=1,
-            )
-
-        # Set up callback
-        async def entity_callback(inter: discord.Interaction):
-            entity_id = int(self.entity_select.values[0])
-            if self.mention_type == "role":
-                self.selected_entity = self.guild.get_role(entity_id)
-            else:
-                self.selected_entity = self.guild.get_member(entity_id)
-            await inter.response.defer()
-
-        self.entity_select.callback = entity_callback
-        self.add_item(self.entity_select)
-
-        await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(label="Insert", style=discord.ButtonStyle.primary, row=2)
-    async def insert_button(self, interaction: discord.Interaction, button: Button):
-        if not self.selected_entity:
+        # Search roles first (case-insensitive)
+        role = discord.utils.find(
+            lambda r: r.name.lower() == search and r.name != "@everyone",
+            self.guild.roles,
+        )
+        if role:
+            self.parent_view.content += f" {role.mention}"
             await interaction.response.send_message(
-                "Please select a role or user first.", ephemeral=True
+                f"Role mention inserted: {role.mention}",
+                ephemeral=True,
             )
+            await self.parent_view.refresh_preview(interaction)
             return
 
-        mention = self.selected_entity.mention
-        self.parent_view.content += f" {mention}"
-
-        await interaction.response.edit_message(
-            content=f"Mention inserted: {mention}",
-            view=None,
+        # Search members by username or display name
+        member = discord.utils.find(
+            lambda m: m.name.lower() == search or m.display_name.lower() == search,
+            self.guild.members,
         )
+        if member:
+            self.parent_view.content += f" {member.mention}"
+            await interaction.response.send_message(
+                f"User mention inserted: {member.mention}",
+                ephemeral=True,
+            )
+            await self.parent_view.refresh_preview(interaction)
+            return
 
-        await self.parent_view.refresh_preview(interaction)
-        self.stop()
+        # Partial match - find roles containing the search term
+        partial_roles = [
+            r for r in self.guild.roles
+            if search in r.name.lower() and r.name != "@everyone"
+        ][:5]
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=2)
-    async def cancel_button(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.edit_message(
-            content="Mention insertion cancelled.", view=None
-        )
-        self.stop()
+        # Partial match - find members containing the search term
+        partial_members = [
+            m for m in self.guild.members
+            if search in m.name.lower() or search in m.display_name.lower()
+        ][:5]
+
+        if partial_roles or partial_members:
+            suggestions = []
+            for r in partial_roles:
+                suggestions.append(f"Role: `{r.name}`")
+            for m in partial_members:
+                suggestions.append(f"User: `{m.display_name}` ({m.name})")
+
+            await interaction.response.send_message(
+                f"No exact match for `{self.name_input.value}`. Did you mean:\n" +
+                "\n".join(suggestions),
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"No role or user found matching `{self.name_input.value}`.",
+                ephemeral=True,
+            )
 
 
 class AnnounceCancelView(View):
