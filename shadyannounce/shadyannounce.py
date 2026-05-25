@@ -884,10 +884,17 @@ class ShadyAnnounce(commands.Cog):
             for ann in scheduled:
                 scheduled_for = datetime.fromisoformat(ann["scheduled_for"])
                 if scheduled_for <= now:
-                    # Time to post - try channel first, then thread
+                    # Time to post - try cache first, then fetch
                     channel = guild.get_channel(ann["channel_id"])
                     if not channel:
                         channel = guild.get_thread(ann["channel_id"])
+                    if not channel:
+                        # Try fetching (works for uncached threads)
+                        try:
+                            channel = await self.bot.fetch_channel(ann["channel_id"])
+                        except (discord.NotFound, discord.Forbidden):
+                            log.warning(f"Channel {ann['channel_id']} not found for announcement #{ann['id']}")
+                            channel = None
                     if channel:
                         try:
                             await channel.send(ann["content"])
