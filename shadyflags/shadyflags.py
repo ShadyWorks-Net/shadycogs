@@ -548,8 +548,10 @@ BAD_ACTOR_KEYWORDS = [
     "malware", "grabber", "token", "compromised", "hacked", "harmful", "threat",
     # Suspicious (matches "Suspicious or spam account")
     "suspicious", "suspect",
-    # HoneyPot detection (matches your mod log)
+    # HoneyPot detection
     "honeypot", "honey pot",
+    # Defender bot auto-bans
+    "defender", "quickaction",
 ]
 
 
