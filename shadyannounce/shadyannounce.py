@@ -258,26 +258,6 @@ class DaySelect(Select):
             options=options[:25],  # Discord limit is 25 options
             min_values=1,
             max_values=1,
-            row=0,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        self.view.day = int(self.values[0])
-        await interaction.response.defer()
-
-
-class DaySelectExtended(Select):
-    """Dropdown for days 26-31."""
-
-    def __init__(self):
-        options = [
-            discord.SelectOption(label=str(d), value=str(d)) for d in range(26, 32)
-        ]
-        super().__init__(
-            placeholder="Day (26-31)",
-            options=options,
-            min_values=1,
-            max_values=1,
             row=1,
         )
 
@@ -318,32 +298,11 @@ class MinuteSelect(Select):
             options=options,
             min_values=1,
             max_values=1,
-            row=2,
+            row=3,
         )
 
     async def callback(self, interaction: discord.Interaction):
         self.view.minute = int(self.values[0])
-        await interaction.response.defer()
-
-
-class AmPmSelect(Select):
-    """Dropdown for selecting AM/PM."""
-
-    def __init__(self):
-        options = [
-            discord.SelectOption(label="AM", value="AM"),
-            discord.SelectOption(label="PM", value="PM"),
-        ]
-        super().__init__(
-            placeholder="AM/PM",
-            options=options,
-            min_values=1,
-            max_values=1,
-            row=2,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        self.view.ampm = self.values[0]
         await interaction.response.defer()
 
 
@@ -368,14 +327,30 @@ class DateTimeSelectView(View):
         self.minute: Optional[int] = None
         self.ampm: Optional[str] = None
 
-        # Add select components
+        # Add select components (each takes a full row)
+        # Row 0: Month, Row 1: Day, Row 2: Hour, Row 3: Minute
         self.add_item(MonthSelect())
         self.add_item(DaySelect())
         self.add_item(HourSelect())
         self.add_item(MinuteSelect())
-        self.add_item(AmPmSelect())
 
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="AM", style=discord.ButtonStyle.secondary, row=4)
+    async def am_button(self, interaction: discord.Interaction, button: Button):
+        self.ampm = "AM"
+        # Update button styles to show selection
+        self.am_button.style = discord.ButtonStyle.primary
+        self.pm_button.style = discord.ButtonStyle.secondary
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="PM", style=discord.ButtonStyle.secondary, row=4)
+    async def pm_button(self, interaction: discord.Interaction, button: Button):
+        self.ampm = "PM"
+        # Update button styles to show selection
+        self.am_button.style = discord.ButtonStyle.secondary
+        self.pm_button.style = discord.ButtonStyle.primary
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.success, row=4)
     async def next_button(self, interaction: discord.Interaction, button: Button):
         # Validate all fields are selected
         missing = []
@@ -449,7 +424,7 @@ class DateTimeSelectView(View):
         await interaction.response.send_modal(modal)
         self.stop()
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=4)
     async def cancel_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.edit_message(
             content="Announcement scheduling cancelled.", view=None
@@ -779,13 +754,27 @@ class TimestampPickerView(View):
         self.minute: Optional[int] = None
         self.ampm: Optional[str] = None
 
+        # Row 0: Month, Row 1: Day, Row 2: Hour, Row 3: Minute
         self.add_item(MonthSelect())
         self.add_item(DaySelect())
         self.add_item(HourSelect())
         self.add_item(MinuteSelect())
-        self.add_item(AmPmSelect())
 
-    @discord.ui.button(label="Insert", style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="AM", style=discord.ButtonStyle.secondary, row=4)
+    async def am_button(self, interaction: discord.Interaction, button: Button):
+        self.ampm = "AM"
+        self.am_button.style = discord.ButtonStyle.primary
+        self.pm_button.style = discord.ButtonStyle.secondary
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="PM", style=discord.ButtonStyle.secondary, row=4)
+    async def pm_button(self, interaction: discord.Interaction, button: Button):
+        self.ampm = "PM"
+        self.am_button.style = discord.ButtonStyle.secondary
+        self.pm_button.style = discord.ButtonStyle.primary
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Insert", style=discord.ButtonStyle.success, row=4)
     async def insert_button(self, interaction: discord.Interaction, button: Button):
         # Validate all fields
         missing = []
@@ -856,7 +845,7 @@ class TimestampPickerView(View):
         await self.parent_view.refresh_preview(interaction)
         self.stop()
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=4)
     async def cancel_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.edit_message(
             content="Timestamp insertion cancelled.", view=None
