@@ -1319,7 +1319,14 @@ class ShadyFlags(commands.Cog):
 
             # Check embeds (most mod bots use embeds)
             for embed in message.embeds:
-                # Extract user ID from various embed fields
+                # PRIMARY: Check embed AUTHOR for user info (Jeebs uses this)
+                # Format: "username (user_id)"
+                if embed.author and embed.author.name and not user_id:
+                    author_match = re.match(r'^(.+?)\s*\((\d{17,20})\)$', embed.author.name)
+                    if author_match:
+                        user_id = int(author_match.group(2))
+
+                # Extract from embed fields
                 for field in embed.fields:
                     field_lower = field.name.lower()
                     if any(n in field_lower for n in ["user", "member", "target", "offender"]):
@@ -1329,20 +1336,20 @@ class ShadyFlags(commands.Cog):
                     elif "reason" in field_lower:
                         reason = reason or field.value
 
-                # Also check description for Jeebs format
+                # Check description for reason and fallback user ID
                 if embed.description:
                     desc = embed.description
 
-                    # Extract user ID from FIRST LINE only (Jeebs: "username (id)\nCase...")
-                    # IMPORTANT: Don't grab IDs from reason text (could be mod ID)
+                    # Fallback: Extract user ID from FIRST LINE
                     if not user_id:
-                        first_line_match = re.match(r'^([^\n(]+)\s*\((\d{17,20})\)', desc)
+                        first_line_match = re.match(r'^([^\n(*]+)\s*\((\d{17,20})\)', desc)
                         if first_line_match:
                             user_id = int(first_line_match.group(2))
 
-                    # Extract reason from "Reason: ..." line in description (Jeebs format)
+                    # Extract reason from description (Jeebs: "**Reason:** ..." or "Reason: ...")
                     if not reason:
-                        reason_match = re.search(r'Reason:\s*([^\n]+)', desc, re.IGNORECASE)
+                        # Handle markdown bold "**Reason:**" format
+                        reason_match = re.search(r'\*?\*?Reason:?\*?\*?\s*([^\n]+)', desc, re.IGNORECASE)
                         if reason_match:
                             reason = reason_match.group(1).strip()
 
@@ -1355,10 +1362,12 @@ class ShadyFlags(commands.Cog):
                     elif "kicked" in desc_lower:
                         action_type = action_type or "kick"
 
-                # Check title for action type
+                # Check title for action type (Jeebs: "Case #XXX | Ban 🔨")
                 if embed.title:
                     title_lower = embed.title.lower()
-                    if "ban" in title_lower:
+                    if "unban" in title_lower:
+                        action_type = "unban"
+                    elif "ban" in title_lower:
                         action_type = action_type or "ban"
                     elif "kick" in title_lower:
                         action_type = action_type or "kick"
@@ -2450,17 +2459,26 @@ class ShadyFlags(commands.Cog):
                                 skipped_no_keyword += 1
                                 continue
 
-                            # Extract user ID and username from FIRST LINE of description
-                            # Jeebs format: "username (user_id)\nCase #XXX | Ban..."
-                            # IMPORTANT: Must get ID from first line, NOT from reason text
+                            # Extract user ID and username
                             user_id = None
                             username = None
-                            first_line_match = re.match(r'^([^\n(]+)\s*\((\d{17,20})\)', desc)
-                            if first_line_match:
-                                username = first_line_match.group(1).strip()
-                                user_id = int(first_line_match.group(2))
 
-                            # Fallback: check embed fields for user ID
+                            # Primary: Check embed AUTHOR (Jeebs uses this)
+                            # Format: "username (user_id)"
+                            if embed.author and embed.author.name:
+                                author_match = re.match(r'^(.+?)\s*\((\d{17,20})\)$', embed.author.name)
+                                if author_match:
+                                    username = author_match.group(1).strip()
+                                    user_id = int(author_match.group(2))
+
+                            # Fallback 1: Check first line of description
+                            if not user_id and desc:
+                                first_line_match = re.match(r'^([^\n(*]+)\s*\((\d{17,20})\)', desc)
+                                if first_line_match:
+                                    username = first_line_match.group(1).strip()
+                                    user_id = int(first_line_match.group(2))
+
+                            # Fallback 2: Check embed fields for user ID
                             if not user_id:
                                 for field in embed.fields:
                                     field_lower = field.name.lower()
@@ -2472,11 +2490,14 @@ class ShadyFlags(commands.Cog):
                             if not user_id:
                                 continue
 
-                            # Extract moderator ID from "Moderator" line (NOT from reason)
+                            # Extract moderator ID from Moderator field
                             mod_id = None
-                            mod_match = re.search(r'Moderator[:\s]*[^\n]*\((\d{17,20})\)', desc, re.IGNORECASE)
-                            if mod_match:
-                                mod_id = int(mod_match.group(1))
+                            for field in embed.fields:
+                                if "moderator" in field.name.lower():
+                                    mod_match = re.search(r'\((\d{17,20})\)', field.value)
+                                    if mod_match:
+                                        mod_id = int(mod_match.group(1))
+                                    break
 
                             # Check if already in network
                             existing = await self.is_in_known_network(interaction.guild, user_id)
