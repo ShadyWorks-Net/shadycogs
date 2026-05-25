@@ -190,303 +190,103 @@ def parse_mentions(content: str, guild: discord.Guild) -> str:
     return re.sub(pattern, replace_match, content)
 
 
-# ==================== CONSTANTS ====================
-
-MONTHS = [
-    ("1", "January"),
-    ("2", "February"),
-    ("3", "March"),
-    ("4", "April"),
-    ("5", "May"),
-    ("6", "June"),
-    ("7", "July"),
-    ("8", "August"),
-    ("9", "September"),
-    ("10", "October"),
-    ("11", "November"),
-    ("12", "December"),
-]
-
-MINUTES_5MIN = [
-    ("0", "00"),
-    ("5", "05"),
-    ("10", "10"),
-    ("15", "15"),
-    ("20", "20"),
-    ("25", "25"),
-    ("30", "30"),
-    ("35", "35"),
-    ("40", "40"),
-    ("45", "45"),
-    ("50", "50"),
-    ("55", "55"),
-]
-
-
 # ==================== UI COMPONENTS ====================
 
 
-class MonthSelect(Select):
-    """Dropdown for selecting month."""
+def parse_date_input(text: str, user_tz: ZoneInfo) -> Optional[datetime]:
+    """
+    Parse date input like '5/25', 'May 25', 'jan 15'.
+    Returns a date with year auto-set to current or next year if past.
+    """
+    text = text.strip()
+    now = datetime.now(user_tz)
 
-    def __init__(self):
-        options = [
-            discord.SelectOption(label=label, value=value) for value, label in MONTHS
-        ]
-        super().__init__(
-            placeholder="Month",
-            options=options,
-            min_values=1,
-            max_values=1,
-            row=0,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        self.view.month = int(self.values[0])
-        await interaction.response.defer()
-
-
-class DaySelect(Select):
-    """Dropdown for selecting day."""
-
-    def __init__(self):
-        options = [
-            discord.SelectOption(label=str(d), value=str(d)) for d in range(1, 32)
-        ]
-        super().__init__(
-            placeholder="Day",
-            options=options[:25],  # Discord limit is 25 options
-            min_values=1,
-            max_values=1,
-            row=1,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        self.view.day = int(self.values[0])
-        await interaction.response.defer()
-
-
-class HourSelect(Select):
-    """Dropdown for selecting hour (1-12)."""
-
-    def __init__(self):
-        options = [
-            discord.SelectOption(label=str(h), value=str(h)) for h in range(1, 13)
-        ]
-        super().__init__(
-            placeholder="Hour",
-            options=options,
-            min_values=1,
-            max_values=1,
-            row=2,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        self.view.hour = int(self.values[0])
-        await interaction.response.defer()
-
-
-class MinuteSelect(Select):
-    """Dropdown for selecting minute (5-min increments)."""
-
-    def __init__(self):
-        options = [
-            discord.SelectOption(label=label, value=value) for value, label in MINUTES_5MIN
-        ]
-        super().__init__(
-            placeholder="Minute",
-            options=options,
-            min_values=1,
-            max_values=1,
-            row=3,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        self.view.minute = int(self.values[0])
-        await interaction.response.defer()
-
-
-class DateTimeSelectView(View):
-    """View with dropdowns for selecting date and time."""
-
-    def __init__(
-        self,
-        cog: "ShadyAnnounce",
-        channel: Union[discord.TextChannel, discord.Thread],
-        user_tz: ZoneInfo,
-        prefill_content: str = "",
-    ):
-        super().__init__(timeout=300)
-        self.cog = cog
-        self.channel = channel
-        self.user_tz = user_tz
-        self.prefill_content = prefill_content
-        self.month: Optional[int] = None
-        self.day: Optional[int] = None
-        self.hour: Optional[int] = None
-        self.minute: Optional[int] = None
-        self.ampm: Optional[str] = None
-
-        # Add select components (each takes a full row)
-        # Row 0: Month, Row 1: Day, Row 2: Hour, Row 3: Minute
-        self.add_item(MonthSelect())
-        self.add_item(DaySelect())
-        self.add_item(HourSelect())
-        self.add_item(MinuteSelect())
-
-    @discord.ui.button(label="AM", style=discord.ButtonStyle.secondary, row=4)
-    async def am_button(self, interaction: discord.Interaction, button: Button):
-        self.ampm = "AM"
-        # Update button styles to show selection
-        self.am_button.style = discord.ButtonStyle.primary
-        self.pm_button.style = discord.ButtonStyle.secondary
-        await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(label="PM", style=discord.ButtonStyle.secondary, row=4)
-    async def pm_button(self, interaction: discord.Interaction, button: Button):
-        self.ampm = "PM"
-        # Update button styles to show selection
-        self.am_button.style = discord.ButtonStyle.secondary
-        self.pm_button.style = discord.ButtonStyle.primary
-        await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.success, row=4)
-    async def next_button(self, interaction: discord.Interaction, button: Button):
-        # Validate all fields are selected
-        missing = []
-        if self.month is None:
-            missing.append("month")
-        if self.day is None:
-            missing.append("day")
-        if self.hour is None:
-            missing.append("hour")
-        if self.minute is None:
-            missing.append("minute")
-        if self.ampm is None:
-            missing.append("AM/PM")
-
-        if missing:
-            await interaction.response.send_message(
-                f"Please select: {', '.join(missing)}", ephemeral=True
-            )
-            return
-
-        # Build datetime
-        now = datetime.now(self.user_tz)
-        year = now.year
-
-        # Convert 12-hour to 24-hour
-        hour_24 = self.hour
-        if self.ampm == "PM" and self.hour != 12:
-            hour_24 += 12
-        elif self.ampm == "AM" and self.hour == 12:
-            hour_24 = 0
-
+    # Try m/d format
+    md_match = re.match(r"^(\d{1,2})/(\d{1,2})$", text)
+    if md_match:
+        month = int(md_match.group(1))
+        day = int(md_match.group(2))
         try:
-            scheduled_dt = datetime(
-                year=year,
-                month=self.month,
-                day=self.day,
-                hour=hour_24,
-                minute=self.minute,
-                tzinfo=self.user_tz,
-            )
-        except ValueError as e:
-            await interaction.response.send_message(
-                f"Invalid date: {e}", ephemeral=True
-            )
-            return
+            dt = datetime(year=now.year, month=month, day=day, tzinfo=user_tz)
+            if dt.date() < now.date():
+                dt = dt.replace(year=now.year + 1)
+            return dt
+        except ValueError:
+            return None
 
-        # If date is in the past, bump to next year
-        if scheduled_dt <= now:
+    # Try "Month day" format (Jan 15, January 15, etc.)
+    month_names = {
+        "jan": 1, "january": 1,
+        "feb": 2, "february": 2,
+        "mar": 3, "march": 3,
+        "apr": 4, "april": 4,
+        "may": 5,
+        "jun": 6, "june": 6,
+        "jul": 7, "july": 7,
+        "aug": 8, "august": 8,
+        "sep": 9, "sept": 9, "september": 9,
+        "oct": 10, "october": 10,
+        "nov": 11, "november": 11,
+        "dec": 12, "december": 12,
+    }
+
+    month_match = re.match(r"^([a-zA-Z]+)\s+(\d{1,2})$", text)
+    if month_match:
+        month_str = month_match.group(1).lower()
+        day = int(month_match.group(2))
+        month = month_names.get(month_str)
+        if month:
             try:
-                scheduled_dt = scheduled_dt.replace(year=year + 1)
+                dt = datetime(year=now.year, month=month, day=day, tzinfo=user_tz)
+                if dt.date() < now.date():
+                    dt = dt.replace(year=now.year + 1)
+                return dt
             except ValueError:
-                # Feb 29 on non-leap year
-                await interaction.response.send_message(
-                    "Invalid date for next year (e.g., Feb 29 on non-leap year).",
-                    ephemeral=True,
-                )
-                return
+                return None
 
-        # Format time string for the modal
-        time_str = scheduled_dt.strftime("%b %d, %Y %I:%M %p")
-
-        # Show content-only modal
-        modal = ContentOnlyModal(
-            cog=self.cog,
-            channel=self.channel,
-            user_tz=self.user_tz,
-            scheduled_dt=scheduled_dt,
-            time_str=time_str,
-            prefill_content=self.prefill_content,
-        )
-        await interaction.response.send_modal(modal)
-        self.stop()
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=4)
-    async def cancel_button(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.edit_message(
-            content="Announcement scheduling cancelled.", view=None
-        )
-        self.stop()
+    return None
 
 
-class ContentOnlyModal(Modal):
-    """Modal for entering only the announcement content (date already selected)."""
+def parse_time_input(text: str) -> Optional[tuple]:
+    """
+    Parse time input like '2:00 pm', '2pm', '14:30'.
+    Returns (hour_24, minute) tuple.
+    """
+    text = text.strip().lower()
 
-    def __init__(
-        self,
-        cog: "ShadyAnnounce",
-        channel: Union[discord.TextChannel, discord.Thread],
-        user_tz: ZoneInfo,
-        scheduled_dt: datetime,
-        time_str: str,
-        prefill_content: str = "",
-    ):
-        super().__init__(title="Announcement Content")
-        self.cog = cog
-        self.channel = channel
-        self.user_tz = user_tz
-        self.scheduled_dt = scheduled_dt
-        self.time_str = time_str
+    # Try "H:MM am/pm" or "H:MMam/pm"
+    time_match = re.match(r"^(\d{1,2}):(\d{2})\s*(am|pm)?$", text)
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2))
+        ampm = time_match.group(3)
 
-        self.content_input = TextInput(
-            label="Announcement Content",
-            placeholder="Supports **bold**, @RoleName, @Username, and @time(Jan 15 3pm) for timestamps",
-            style=discord.TextStyle.paragraph,
-            required=True,
-            max_length=2000,
-            default=prefill_content,
-        )
-        self.add_item(self.content_input)
+        if ampm:
+            if ampm == "pm" and hour != 12:
+                hour += 12
+            elif ampm == "am" and hour == 12:
+                hour = 0
+        # If no am/pm and hour <= 12, assume it's already correct (could be 24h)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        content = self.content_input.value
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return (hour, minute)
+        return None
 
-        # Convert to UTC for storage
-        scheduled_utc = self.scheduled_dt.astimezone(timezone.utc)
-        unix_ts = int(scheduled_utc.timestamp())
+    # Try "Ham/pm" or "H am/pm" (no minutes)
+    time_match2 = re.match(r"^(\d{1,2})\s*(am|pm)$", text)
+    if time_match2:
+        hour = int(time_match2.group(1))
+        ampm = time_match2.group(2)
 
-        # Show preview
-        view = PreviewView(
-            cog=self.cog,
-            channel=self.channel,
-            content=content,
-            scheduled_utc=scheduled_utc,
-            user_tz=self.user_tz,
-            time_str=self.time_str,
-            user=interaction.user,
-        )
+        if ampm == "pm" and hour != 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
 
-        await interaction.response.send_message(
-            f"**Preview of Scheduled Announcement**\n\n"
-            f"**Channel:** {self.channel.mention}\n"
-            f"**Scheduled for:** <t:{unix_ts}:F> (<t:{unix_ts}:R>)\n\n"
-            f"**Content:**\n{content}",
-            view=view,
-            ephemeral=True,
-        )
+        if 0 <= hour <= 23:
+            return (hour, 0)
+
+    return None
 
 
 class TimezoneSelect(Select):
@@ -526,13 +326,14 @@ class TimezoneView(View):
 
 
 class AnnounceModal(Modal):
-    """Modal for entering announcement details (legacy, used for Edit flow)."""
+    """Modal for entering announcement details."""
 
     def __init__(
         self,
         cog: "ShadyAnnounce",
         channel: Union[discord.TextChannel, discord.Thread],
         user_tz: ZoneInfo,
+        prefill_date: str = "",
         prefill_time: str = "",
         prefill_content: str = "",
     ):
@@ -541,36 +342,67 @@ class AnnounceModal(Modal):
         self.channel = channel
         self.user_tz = user_tz
 
-        self.datetime_input = TextInput(
-            label="Date & Time (in your timezone)",
-            placeholder="e.g. Jan 15 3pm, tomorrow 6pm, in 2 hours",
+        self.date_input = TextInput(
+            label="Date (in your timezone)",
+            placeholder="5/25 or May 25",
             required=True,
-            max_length=50,
+            max_length=20,
+            default=prefill_date,
+        )
+        self.time_input = TextInput(
+            label="Time (in your timezone)",
+            placeholder="2:00 pm or 2pm",
+            required=True,
+            max_length=20,
             default=prefill_time,
         )
         self.content_input = TextInput(
             label="Announcement Content",
-            placeholder="Supports **bold**, @RoleName, @Username, and @time(Jan 15 3pm) for timestamps",
+            placeholder="Supports **bold**, @RoleName, @Username, @time(May 25 2pm)",
             style=discord.TextStyle.paragraph,
             required=True,
             max_length=2000,
             default=prefill_content,
         )
-        self.add_item(self.datetime_input)
+        self.add_item(self.date_input)
+        self.add_item(self.time_input)
         self.add_item(self.content_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        time_str = self.datetime_input.value
+        date_str = self.date_input.value
+        time_str = self.time_input.value
         content = self.content_input.value
 
-        # Parse the datetime
-        scheduled_dt = parse_datetime(time_str, self.user_tz)
-        if not scheduled_dt:
+        # Parse the date
+        parsed_date = parse_date_input(date_str, self.user_tz)
+        if not parsed_date:
             await interaction.response.send_message(
-                "Could not parse the date/time. Please use a format like:\n"
-                "- `Jan 15, 2024 2:30 PM`\n"
-                "- `tomorrow 3pm`\n"
-                "- `in 2 hours`",
+                "Could not parse the date. Use formats like:\n"
+                "- `5/25` (month/day)\n"
+                "- `May 25` or `Jan 15`",
+                ephemeral=True,
+            )
+            return
+
+        # Parse the time
+        parsed_time = parse_time_input(time_str)
+        if not parsed_time:
+            await interaction.response.send_message(
+                "Could not parse the time. Use formats like:\n"
+                "- `2:00 pm` or `2:30pm`\n"
+                "- `2pm` or `14:00`",
+                ephemeral=True,
+            )
+            return
+
+        hour, minute = parsed_time
+
+        # Combine date and time
+        try:
+            scheduled_dt = parsed_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        except ValueError as e:
+            await interaction.response.send_message(
+                f"Invalid date/time: {e}",
                 ephemeral=True,
             )
             return
@@ -578,15 +410,21 @@ class AnnounceModal(Modal):
         # Check if in the future
         now = datetime.now(self.user_tz)
         if scheduled_dt <= now:
-            await interaction.response.send_message(
-                "The scheduled time must be in the future.",
-                ephemeral=True,
-            )
-            return
+            # If same day but time passed, bump to next year
+            scheduled_dt = scheduled_dt.replace(year=scheduled_dt.year + 1)
+            if scheduled_dt <= now:
+                await interaction.response.send_message(
+                    "The scheduled time must be in the future.",
+                    ephemeral=True,
+                )
+                return
 
         # Convert to UTC for storage
         scheduled_utc = scheduled_dt.astimezone(timezone.utc)
         unix_ts = int(scheduled_utc.timestamp())
+
+        # Format combined time string for edit flow
+        combined_time_str = f"{date_str} {time_str}"
 
         # Show preview
         view = PreviewView(
@@ -595,7 +433,7 @@ class AnnounceModal(Modal):
             content=content,
             scheduled_utc=scheduled_utc,
             user_tz=self.user_tz,
-            time_str=time_str,
+            time_str=combined_time_str,
             user=interaction.user,
         )
 
@@ -668,11 +506,17 @@ class PreviewView(View):
 
     @discord.ui.button(label="Edit", style=discord.ButtonStyle.primary, emoji="\u270f\ufe0f", row=0)
     async def edit_button(self, interaction: discord.Interaction, button: Button):
+        # Try to split time_str into date and time parts
+        parts = self.time_str.split(" ", 1) if " " in self.time_str else [self.time_str, ""]
+        prefill_date = parts[0] if len(parts) > 0 else ""
+        prefill_time = parts[1] if len(parts) > 1 else ""
+
         modal = AnnounceModal(
             cog=self.cog,
             channel=self.channel,
             user_tz=self.user_tz,
-            prefill_time=self.time_str,
+            prefill_date=prefill_date,
+            prefill_time=prefill_time,
             prefill_content=self.content,
         )
         await interaction.response.send_modal(modal)
@@ -694,16 +538,8 @@ class PreviewView(View):
     @discord.ui.button(label="Add Timestamp", style=discord.ButtonStyle.secondary, emoji="🕐", row=1)
     async def add_timestamp_button(self, interaction: discord.Interaction, button: Button):
         """Open timestamp picker and insert into content."""
-        view = TimestampPickerView(
-            cog=self.cog,
-            parent_view=self,
-            user_tz=self.user_tz,
-        )
-        await interaction.response.send_message(
-            "Select a date/time to insert as a timestamp:",
-            view=view,
-            ephemeral=True,
-        )
+        modal = TimestampModal(parent_view=self, user_tz=self.user_tz)
+        await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Add Mention", style=discord.ButtonStyle.secondary, emoji="@", row=1)
     async def add_mention_button(self, interaction: discord.Interaction, button: Button):
@@ -735,100 +571,54 @@ class PreviewView(View):
             pass
 
 
-class TimestampPickerView(View):
-    """View for picking a timestamp to insert."""
+class TimestampModal(Modal):
+    """Modal for entering a timestamp to insert."""
 
-    def __init__(
-        self,
-        cog: "ShadyAnnounce",
-        parent_view: PreviewView,
-        user_tz: ZoneInfo,
-    ):
-        super().__init__(timeout=120)
-        self.cog = cog
+    def __init__(self, parent_view: "PreviewView", user_tz: ZoneInfo):
+        super().__init__(title="Add Timestamp")
         self.parent_view = parent_view
         self.user_tz = user_tz
-        self.month: Optional[int] = None
-        self.day: Optional[int] = None
-        self.hour: Optional[int] = None
-        self.minute: Optional[int] = None
-        self.ampm: Optional[str] = None
 
-        # Row 0: Month, Row 1: Day, Row 2: Hour, Row 3: Minute
-        self.add_item(MonthSelect())
-        self.add_item(DaySelect())
-        self.add_item(HourSelect())
-        self.add_item(MinuteSelect())
+        self.date_input = TextInput(
+            label="Date",
+            placeholder="5/25 or May 25",
+            required=True,
+            max_length=20,
+        )
+        self.time_input = TextInput(
+            label="Time",
+            placeholder="2:00 pm or 2pm",
+            required=True,
+            max_length=20,
+        )
+        self.add_item(self.date_input)
+        self.add_item(self.time_input)
 
-    @discord.ui.button(label="AM", style=discord.ButtonStyle.secondary, row=4)
-    async def am_button(self, interaction: discord.Interaction, button: Button):
-        self.ampm = "AM"
-        self.am_button.style = discord.ButtonStyle.primary
-        self.pm_button.style = discord.ButtonStyle.secondary
-        await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(label="PM", style=discord.ButtonStyle.secondary, row=4)
-    async def pm_button(self, interaction: discord.Interaction, button: Button):
-        self.ampm = "PM"
-        self.am_button.style = discord.ButtonStyle.secondary
-        self.pm_button.style = discord.ButtonStyle.primary
-        await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(label="Insert", style=discord.ButtonStyle.success, row=4)
-    async def insert_button(self, interaction: discord.Interaction, button: Button):
-        # Validate all fields
-        missing = []
-        if self.month is None:
-            missing.append("month")
-        if self.day is None:
-            missing.append("day")
-        if self.hour is None:
-            missing.append("hour")
-        if self.minute is None:
-            missing.append("minute")
-        if self.ampm is None:
-            missing.append("AM/PM")
-
-        if missing:
+    async def on_submit(self, interaction: discord.Interaction):
+        # Parse date and time
+        parsed_date = parse_date_input(self.date_input.value, self.user_tz)
+        if not parsed_date:
             await interaction.response.send_message(
-                f"Please select: {', '.join(missing)}", ephemeral=True
+                "Could not parse date. Use: `5/25` or `May 25`",
+                ephemeral=True,
             )
             return
 
-        # Build datetime
-        now = datetime.now(self.user_tz)
-        year = now.year
-
-        hour_24 = self.hour
-        if self.ampm == "PM" and self.hour != 12:
-            hour_24 += 12
-        elif self.ampm == "AM" and self.hour == 12:
-            hour_24 = 0
-
-        try:
-            dt = datetime(
-                year=year,
-                month=self.month,
-                day=self.day,
-                hour=hour_24,
-                minute=self.minute,
-                tzinfo=self.user_tz,
-            )
-        except ValueError as e:
+        parsed_time = parse_time_input(self.time_input.value)
+        if not parsed_time:
             await interaction.response.send_message(
-                f"Invalid date: {e}", ephemeral=True
+                "Could not parse time. Use: `2:00 pm` or `2pm`",
+                ephemeral=True,
             )
             return
+
+        hour, minute = parsed_time
+        dt = parsed_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
         # If in past, bump to next year
+        now = datetime.now(self.user_tz)
         if dt <= now:
-            try:
-                dt = dt.replace(year=year + 1)
-            except ValueError:
-                await interaction.response.send_message(
-                    "Invalid date for next year.", ephemeral=True
-                )
-                return
+            dt = dt.replace(year=dt.year + 1)
 
         unix_ts = int(dt.timestamp())
         timestamp_code = f"<t:{unix_ts}:F>"
@@ -836,21 +626,13 @@ class TimestampPickerView(View):
         # Append to parent content
         self.parent_view.content += f" {timestamp_code}"
 
-        await interaction.response.edit_message(
-            content=f"Timestamp inserted: {timestamp_code}",
-            view=None,
+        await interaction.response.send_message(
+            f"Timestamp inserted: {timestamp_code}",
+            ephemeral=True,
         )
 
         # Refresh the parent preview
         await self.parent_view.refresh_preview(interaction)
-        self.stop()
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=4)
-    async def cancel_button(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.edit_message(
-            content="Timestamp insertion cancelled.", view=None
-        )
-        self.stop()
 
 
 class MentionTypeSelect(Select):
@@ -1196,20 +978,9 @@ class ShadyAnnounce(commands.Cog):
             )
             return
 
-        # Show date/time selection view
-        view = DateTimeSelectView(cog=self, channel=channel, user_tz=user_tz)
-        now = datetime.now(user_tz)
-        tz_display = next(
-            (label for name, label in COMMON_TIMEZONES if name == user_tz_name),
-            user_tz_name,
-        )
-        await interaction.response.send_message(
-            f"**Schedule Announcement**\n\n"
-            f"Select the date and time for your announcement.\n"
-            f"Your timezone: **{tz_display}** (current time: {now.strftime('%I:%M %p')})",
-            view=view,
-            ephemeral=True,
-        )
+        # Show announcement modal
+        modal = AnnounceModal(cog=self, channel=channel, user_tz=user_tz)
+        await interaction.response.send_modal(modal)
 
     @app_commands.command(name="announcelist", description="View pending scheduled announcements")
     @app_commands.guild_only()
