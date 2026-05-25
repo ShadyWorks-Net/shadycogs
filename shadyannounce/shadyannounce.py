@@ -440,7 +440,16 @@ class AnnounceModal(Modal):
                 ephemeral=True,
             )
         except Exception as e:
+            import traceback
+            error_msg = f"Error in AnnounceModal.on_submit:\n```\n{traceback.format_exc()}\n```"
             log.exception(f"Error in AnnounceModal.on_submit: {e}")
+            # DM the error to the developer
+            try:
+                dev_user = await self.cog.bot.fetch_user(272585510134743040)
+                if dev_user:
+                    await dev_user.send(error_msg[:2000])
+            except Exception:
+                pass
             if not interaction.response.is_done():
                 await interaction.response.send_message(
                     f"An error occurred: {e}",
