@@ -111,6 +111,36 @@ def parse_datetime(text: str, user_tz: ZoneInfo) -> Optional[datetime]:
             result += timedelta(days=1)
         return result
 
+    # Natural language: "Month day, time" (e.g., "May 25, 3pm" or "Jan 15, 2:30pm")
+    month_names = {
+        "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+        "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+        "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+        "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+    }
+    month_time_match = re.match(
+        r"([a-z]+)\s+(\d{1,2}),?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text, re.IGNORECASE
+    )
+    if month_time_match:
+        month_str = month_time_match.group(1).lower()
+        day = int(month_time_match.group(2))
+        hour = int(month_time_match.group(3))
+        minute = int(month_time_match.group(4)) if month_time_match.group(4) else 0
+        ampm = month_time_match.group(5).lower()
+        month = month_names.get(month_str)
+        if month:
+            if ampm == "pm" and hour != 12:
+                hour += 12
+            elif ampm == "am" and hour == 12:
+                hour = 0
+            try:
+                result = datetime(year=now.year, month=month, day=day, hour=hour, minute=minute, tzinfo=user_tz)
+                if result <= now:
+                    result = result.replace(year=now.year + 1)
+                return result
+            except ValueError:
+                pass
+
     # Standard formats
     formats = [
         "%Y-%m-%d %H:%M",
@@ -482,6 +512,7 @@ class PreviewView(View):
         self.user_tz = user_tz
         self.time_str = time_str
         self.user = user
+        self.preview_message: Optional[discord.Message] = None  # Set when buttons are clicked
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="\u2705", row=0)
     async def confirm_button(self, interaction: discord.Interaction, button: Button):
@@ -552,25 +583,29 @@ class PreviewView(View):
     @discord.ui.button(label="Add Timestamp", style=discord.ButtonStyle.secondary, emoji="🕐", row=1)
     async def add_timestamp_button(self, interaction: discord.Interaction, button: Button):
         """Open timestamp picker and insert into content."""
+        self.preview_message = interaction.message  # Store reference for refresh
         modal = TimestampModal(parent_view=self, user_tz=self.user_tz)
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Add Mention", style=discord.ButtonStyle.secondary, row=1)
     async def add_mention_button(self, interaction: discord.Interaction, button: Button):
         """Open mention search modal."""
+        self.preview_message = interaction.message  # Store reference for refresh
         modal = MentionModal(parent_view=self, guild=interaction.guild)
         await interaction.response.send_modal(modal)
 
     async def refresh_preview(self, interaction: discord.Interaction):
         """Refresh the preview message with updated content."""
+        if not self.preview_message:
+            return
         unix_ts = int(self.scheduled_utc.timestamp())
         try:
             # Convert content for preview display
             preview_content = parse_time_tags(self.content, self.user_tz)
             preview_content = parse_mentions(preview_content, interaction.guild)
 
-            # Find the original preview message and update it
-            await interaction.message.edit(
+            # Update the stored preview message
+            await self.preview_message.edit(
                 content=f"**Preview of Scheduled Announcement**\n\n"
                 f"**Channel:** {self.channel.mention}\n"
                 f"**Scheduled for:** <t:{unix_ts}:F> (<t:{unix_ts}:R>)\n\n"
@@ -834,12 +869,12 @@ class ShadyAnnounce(commands.Cog):
             try:
                 for guild in self.bot.guilds:
                     await self._process_guild_announcements(guild)
-                await asyncio.sleep(180)  # Check every 3 minutes
+                await asyncio.sleep(60)  # Check every 1 minute
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log.error(f"Error in announcement loop: {e}")
-                await asyncio.sleep(180)
+                await asyncio.sleep(60)
 
     async def _process_guild_announcements(self, guild: discord.Guild) -> None:
         """Process and post due announcements for a guild."""
@@ -849,8 +884,10 @@ class ShadyAnnounce(commands.Cog):
             for ann in scheduled:
                 scheduled_for = datetime.fromisoformat(ann["scheduled_for"])
                 if scheduled_for <= now:
-                    # Time to post
+                    # Time to post - try channel first, then thread
                     channel = guild.get_channel(ann["channel_id"])
+                    if not channel:
+                        channel = guild.get_thread(ann["channel_id"])
                     if channel:
                         try:
                             await channel.send(ann["content"])
