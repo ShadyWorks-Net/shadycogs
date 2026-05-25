@@ -2816,12 +2816,18 @@ class ShadyFlags(commands.Cog):
                     if has_keyword:
                         keywords_found += 1
 
+                    # Check all embed parts for user info
+                    author_name = embed.author.name if embed.author else "(no author)"
+                    title = embed.title or "(no title)"
+                    fields_info = ", ".join([f"{f.name}: {f.value[:30]}" for f in embed.fields]) if embed.fields else "(no fields)"
+
                     debug_lines.append(
                         f"**Ban #{bans_found}** {'✅ HAS KEYWORD' if has_keyword else '❌ no keyword'}\n"
-                        f"First line: `{first_line[:60]}...`\n"
-                        f"Extracted name: `{extracted_name}`\n"
-                        f"Extracted ID: `{extracted_id}`\n"
-                        f"Reason: `{reason[:80]}...`\n"
+                        f"Author: `{author_name[:50]}`\n"
+                        f"Title: `{title[:50]}`\n"
+                        f"Desc first line: `{first_line[:50]}`\n"
+                        f"Fields: `{fields_info[:100]}`\n"
+                        f"Extracted: `{extracted_name}` / `{extracted_id}`\n"
                     )
 
                     # Send in batches to avoid rate limits
