@@ -2697,8 +2697,9 @@ class ShadyFlags(commands.Cog):
             )
 
         elif action == "clearall":
-            # Require admin for this dangerous action
-            if not interaction.user.guild_permissions.administrator:
+            # Require admin or bot owner for this dangerous action
+            is_owner = await self.bot.is_owner(interaction.user)
+            if not is_owner and not interaction.user.guild_permissions.administrator:
                 await interaction.response.send_message(
                     "❌ Only administrators can clear the entire network.",
                     ephemeral=True
