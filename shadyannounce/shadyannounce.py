@@ -473,6 +473,8 @@ class AnnounceModal(Modal):
                 view=view,
                 ephemeral=True,
             )
+            # Store interaction for editing ephemeral message later
+            view.original_interaction = interaction
         except Exception as e:
             import traceback
             error_msg = f"Error in AnnounceModal.on_submit:\n```\n{traceback.format_exc()}\n```"
@@ -513,6 +515,7 @@ class PreviewView(View):
         self.time_str = time_str
         self.user = user
         self.preview_message: Optional[discord.Message] = None  # Set when buttons are clicked
+        self.original_interaction: Optional[discord.Interaction] = None  # For editing ephemeral
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="\u2705", row=0)
     async def confirm_button(self, interaction: discord.Interaction, button: Button):
@@ -596,8 +599,8 @@ class PreviewView(View):
 
     async def refresh_preview(self, interaction: discord.Interaction):
         """Refresh the preview message with updated content."""
-        if not self.preview_message:
-            log.warning("refresh_preview called but preview_message is None")
+        if not self.original_interaction:
+            log.warning("refresh_preview called but original_interaction is None")
             return
         unix_ts = int(self.scheduled_utc.timestamp())
         try:
@@ -605,13 +608,13 @@ class PreviewView(View):
             preview_content = parse_time_tags(self.content, self.user_tz)
             preview_content = parse_mentions(preview_content, interaction.guild)
 
-            # Update the stored preview message
-            await self.preview_message.edit(
+            # Edit the ephemeral message using the original interaction
+            await self.original_interaction.edit_original_response(
                 content=f"**Preview of Scheduled Announcement**\n\n"
                 f"**Channel:** {self.channel.mention}\n"
                 f"**Scheduled for:** <t:{unix_ts}:F> (<t:{unix_ts}:R>)\n\n"
                 f"**Content:**\n{preview_content}",
-                view=self,  # Re-attach the view to keep buttons working
+                view=self,
             )
         except Exception as e:
             log.error(f"Failed to refresh preview: {e}")
