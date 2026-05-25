@@ -2722,9 +2722,22 @@ class ShadyFlags(commands.Cog):
             # Also clear join features (ML training data)
             await self.config.guild(interaction.guild).join_features.set([])
 
+            # Also clear ShadyAlts confirmed/suspects that came from ShadyFlags
+            alts_cleared = False
+            alts_cog = self.bot.get_cog("ShadyAlts")
+            if alts_cog:
+                try:
+                    # Clear confirmed and suspects lists
+                    await alts_cog.config.guild(interaction.guild).confirmed.set({})
+                    await alts_cog.config.guild(interaction.guild).suspects.set({})
+                    alts_cleared = True
+                except Exception as e:
+                    log.error(f"Error clearing ShadyAlts data: {e}")
+
             await interaction.response.send_message(
                 f"✅ Cleared **{count}** bad actors from the network.\n"
-                f"ML training data has also been reset.\n"
+                f"{'✅ ShadyAlts confirmed/suspects also cleared.' if alts_cleared else '⚠️ ShadyAlts not loaded - clear manually.'}\n"
+                f"ML training data has been reset.\n"
                 f"Run `/flagnetwork scan` to rebuild from mod log history.",
                 ephemeral=True
             )
@@ -2733,7 +2746,7 @@ class ShadyFlags(commands.Cog):
                 interaction.guild,
                 f"⚠️ **Network Cleared** by {interaction.user.mention}\n"
                 f"**Bad Actors Removed:** {count}\n"
-                f"ML training data has been reset."
+                f"ShadyAlts and ML training data also reset."
             )
 
     @app_commands.command(name="flagml", description="ML risk scoring management")
