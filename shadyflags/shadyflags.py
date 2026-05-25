@@ -1329,19 +1329,28 @@ class ShadyFlags(commands.Cog):
                     elif "reason" in field_lower:
                         reason = reason or field.value
 
-                # Also check description for user mention and Jeebs format
+                # Also check description for Jeebs format
                 if embed.description:
-                    user_id = user_id or parse_user_id_from_text(embed.description)
+                    desc = embed.description
+
+                    # Extract user ID from FIRST LINE only (Jeebs: "username (id)\nCase...")
+                    # IMPORTANT: Don't grab IDs from reason text (could be mod ID)
+                    if not user_id:
+                        first_line_match = re.match(r'^([^\n(]+)\s*\((\d{17,20})\)', desc)
+                        if first_line_match:
+                            user_id = int(first_line_match.group(2))
 
                     # Extract reason from "Reason: ..." line in description (Jeebs format)
                     if not reason:
-                        reason_match = re.search(r'Reason:\s*(.+?)(?:\n|Moderator|$)', embed.description, re.IGNORECASE)
+                        reason_match = re.search(r'Reason:\s*([^\n]+)', desc, re.IGNORECASE)
                         if reason_match:
                             reason = reason_match.group(1).strip()
 
                     # Check description for action keywords
-                    desc_lower = embed.description.lower()
-                    if "banned" in desc_lower or "ban" in desc_lower:
+                    desc_lower = desc.lower()
+                    if "unban" in desc_lower:
+                        action_type = "unban"  # Skip unbans
+                    elif "banned" in desc_lower or "ban" in desc_lower:
                         action_type = action_type or "ban"
                     elif "kicked" in desc_lower:
                         action_type = action_type or "kick"
@@ -2255,6 +2264,7 @@ class ShadyFlags(commands.Cog):
         app_commands.Choice(name="Remove User", value="remove"),
         app_commands.Choice(name="Check User", value="check"),
         app_commands.Choice(name="Toggle Auto-Parse", value="toggle"),
+        app_commands.Choice(name="Clear All (Reset Network)", value="clearall"),
     ])
     async def flagnetwork_cmd(
         self,
@@ -2439,10 +2449,17 @@ class ShadyFlags(commands.Cog):
                                 skipped_no_keyword += 1
                                 continue
 
-                            # Extract user ID from description
-                            user_id = parse_user_id_from_text(desc)
+                            # Extract user ID and username from FIRST LINE of description
+                            # Jeebs format: "username (user_id)\nCase #XXX | Ban..."
+                            # IMPORTANT: Must get ID from first line, NOT from reason text
+                            user_id = None
+                            username = None
+                            first_line_match = re.match(r'^([^\n(]+)\s*\((\d{17,20})\)', desc)
+                            if first_line_match:
+                                username = first_line_match.group(1).strip()
+                                user_id = int(first_line_match.group(2))
 
-                            # Also check fields for user ID
+                            # Fallback: check embed fields for user ID
                             if not user_id:
                                 for field in embed.fields:
                                     field_lower = field.name.lower()
@@ -2454,15 +2471,9 @@ class ShadyFlags(commands.Cog):
                             if not user_id:
                                 continue
 
-                            # Extract username from "username (id)" format
-                            username = None
-                            username_match = re.match(r'^([^\n(]+)\s*\(\d{17,20}\)', desc)
-                            if username_match:
-                                username = username_match.group(1).strip()
-
-                            # Extract moderator ID if present
+                            # Extract moderator ID from "Moderator" line (NOT from reason)
                             mod_id = None
-                            mod_match = re.search(r'Moderator[:\s]*[^\d]*(\d{17,20})', desc, re.IGNORECASE)
+                            mod_match = re.search(r'Moderator[:\s]*[^\n]*\((\d{17,20})\)', desc, re.IGNORECASE)
                             if mod_match:
                                 mod_id = int(mod_match.group(1))
 
@@ -2683,6 +2694,46 @@ class ShadyFlags(commands.Cog):
                 f"✅ Auto-parse mod log is now **{status}**.\n"
                 f"{'Mod log messages will be parsed for bad actors.' if not current else 'Mod log parsing stopped.'}",
                 ephemeral=True
+            )
+
+        elif action == "clearall":
+            # Require admin for this dangerous action
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message(
+                    "❌ Only administrators can clear the entire network.",
+                    ephemeral=True
+                )
+                return
+
+            # Get current count
+            network = await self.config.guild(interaction.guild).known_network()
+            count = len(network)
+
+            if count == 0:
+                await interaction.response.send_message(
+                    "Network is already empty.",
+                    ephemeral=True
+                )
+                return
+
+            # Clear the network
+            await self.config.guild(interaction.guild).known_network.set({})
+
+            # Also clear join features (ML training data)
+            await self.config.guild(interaction.guild).join_features.set([])
+
+            await interaction.response.send_message(
+                f"✅ Cleared **{count}** bad actors from the network.\n"
+                f"ML training data has also been reset.\n"
+                f"Run `/flagnetwork scan` to rebuild from mod log history.",
+                ephemeral=True
+            )
+
+            await self.log_to_mod_channel(
+                interaction.guild,
+                f"⚠️ **Network Cleared** by {interaction.user.mention}\n"
+                f"**Bad Actors Removed:** {count}\n"
+                f"ML training data has been reset."
             )
 
     @app_commands.command(name="flagml", description="ML risk scoring management")
