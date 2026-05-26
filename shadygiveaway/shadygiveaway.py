@@ -66,13 +66,6 @@ class GiveawayCreateModal(discord.ui.Modal, title="Create Giveaway"):
         max_length=20,
     )
 
-    max_entries = discord.ui.TextInput(
-        label="Max Entries (Optional)",
-        placeholder="Leave empty for unlimited entries",
-        required=False,
-        max_length=10,
-    )
-
     def __init__(self, cog: "ShadyGiveaway"):
         super().__init__()
         self.cog = cog
@@ -114,21 +107,6 @@ class GiveawayCreateModal(discord.ui.Modal, title="Create Giveaway"):
                 )
                 return
 
-            # Parse max entries
-            max_entries_value = None
-            max_entries_str = str(self.max_entries).strip()
-            if max_entries_str:
-                try:
-                    max_entries_value = int(max_entries_str)
-                    if max_entries_value < 1:
-                        raise ValueError
-                except ValueError:
-                    await interaction.response.send_message(
-                        "Max entries must be a positive number or leave empty for unlimited.",
-                        ephemeral=True,
-                    )
-                    return
-
             # Parse prize name and description (split on first newline)
             full_text = str(self.prize_description)
             if "\n" in full_text:
@@ -148,7 +126,6 @@ class GiveawayCreateModal(discord.ui.Modal, title="Create Giveaway"):
                 "winners_count": winners,
                 "prize_code": str(self.prize_code),
                 "claim_timeout_seconds": int(claim_timeout_delta.total_seconds()),
-                "max_entries": max_entries_value,
                 "igdb_data": None,
             }
 
