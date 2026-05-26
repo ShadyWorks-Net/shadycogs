@@ -13,15 +13,25 @@ import json
 import logging
 import random
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
-from cryptography.fernet import Fernet
 from redbot.core import commands, Config
 from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import humanize_timedelta
 from discord import app_commands
+
+# Try to import cryptography, track if it fails
+CRYPTO_AVAILABLE = True
+CRYPTO_ERROR = None
+try:
+    from cryptography.fernet import Fernet
+except ImportError as e:
+    CRYPTO_AVAILABLE = False
+    CRYPTO_ERROR = str(e)
+    Fernet = None  # Placeholder
 
 log = logging.getLogger("red.shadycogs.shadygiveaway")
 
@@ -3753,5 +3763,35 @@ class SaveTemplateModal(discord.ui.Modal, title="Save Custom Template"):
 
 
 async def setup(bot: Red):
-    cog = ShadyGiveaway(bot)
-    await bot.add_cog(cog)
+    # DM bot owner if cryptography is missing
+    if not CRYPTO_AVAILABLE:
+        error_msg = (
+            f"**ShadyGiveaway failed to load!**\n\n"
+            f"Missing dependency: `cryptography`\n"
+            f"Error: `{CRYPTO_ERROR}`\n\n"
+            f"**Fix:** Run this command:\n"
+            f"```\n[p]pipinstall cryptography\n```\n"
+            f"Then restart the bot or reload the cog."
+        )
+        try:
+            owner = await bot.get_or_fetch_user(bot.owner_id)
+            if owner:
+                await owner.send(error_msg)
+        except Exception:
+            pass
+        raise ImportError(f"cryptography package not installed: {CRYPTO_ERROR}")
+
+    try:
+        cog = ShadyGiveaway(bot)
+        await bot.add_cog(cog)
+    except Exception as e:
+        # DM full traceback to bot owner
+        tb = traceback.format_exc()
+        error_msg = f"**ShadyGiveaway failed to load!**\n\n```py\n{tb[-1900:]}\n```"
+        try:
+            owner = await bot.get_or_fetch_user(bot.owner_id)
+            if owner:
+                await owner.send(error_msg)
+        except Exception:
+            pass
+        raise
