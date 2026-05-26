@@ -130,34 +130,31 @@ class GiveawayCreateModal(discord.ui.Modal, title="Create Giveaway"):
             }
 
             # Try IGDB lookup if configured
-            igdb_data = await self.cog.search_igdb(interaction.guild.id, prize_name)
-            if igdb_data:
-                # Show confirmation with game info
-                game_name = igdb_data.get("name", prize_name)
-                cover_url = igdb_data.get("cover", {}).get("url", "")
-                if cover_url and not cover_url.startswith("http"):
-                    cover_url = "https:" + cover_url
-                cover_url = cover_url.replace("t_thumb", "t_cover_big")
-
+            igdb_results = await self.cog.search_igdb(interaction.guild.id, prize_name)
+            if igdb_results:
+                # Build embed showing found games
                 confirm_embed = discord.Embed(
-                    title="🎮 IGDB Game Found",
-                    description=f"Is **{game_name}** the correct game?",
+                    title="🎮 IGDB Games Found",
+                    description=f"Found **{len(igdb_results)}** result(s) for **{prize_name}**.\n\nSelect the correct game from the dropdown below:",
                     color=discord.Color.blue()
                 )
-                if cover_url:
-                    confirm_embed.set_thumbnail(url=cover_url)
-                if igdb_data.get("summary"):
-                    summary = igdb_data["summary"][:200]
-                    if len(igdb_data["summary"]) > 200:
-                        summary += "..."
-                    confirm_embed.add_field(name="Description", value=summary, inline=False)
 
-                view = GiveawayOptionsView(self.cog, pending_data, interaction.guild)
-                view.pending_igdb_data = igdb_data  # Store for later confirmation
+                # List the games found
+                games_list = []
+                for i, game in enumerate(igdb_results[:5], 1):
+                    name = game.get("name", "Unknown")
+                    release_date = game.get("first_release_date")
+                    if release_date:
+                        year = datetime.fromtimestamp(release_date).year
+                        games_list.append(f"{i}. **{name}** ({year})")
+                    else:
+                        games_list.append(f"{i}. **{name}**")
+
+                confirm_embed.add_field(name="Results", value="\n".join(games_list), inline=False)
 
                 await interaction.response.send_message(
                     embed=confirm_embed,
-                    view=IGDBConfirmThenOptionsView(self.cog, igdb_data, pending_data, interaction.guild),
+                    view=IGDBConfirmThenOptionsView(self.cog, igdb_results, pending_data, interaction.guild),
                     ephemeral=True
                 )
                 return
@@ -845,27 +842,75 @@ class AuditChannelSelectView(discord.ui.View):
 
 
 class IGDBConfirmThenOptionsView(discord.ui.View):
-    """View for confirming IGDB game match and then showing giveaway options."""
+    """View for selecting from IGDB search results and then showing giveaway options."""
 
-    def __init__(self, cog: "ShadyGiveaway", game_data: Dict[str, Any], pending_data: Dict[str, Any],
+    def __init__(self, cog: "ShadyGiveaway", games: List[Dict[str, Any]], pending_data: Dict[str, Any],
                  guild: discord.Guild):
         super().__init__(timeout=120)
         self.cog = cog
-        self.game_data = game_data
+        self.games = games
         self.pending_data = pending_data
         self.guild = guild
+        self.selected_game: Optional[Dict[str, Any]] = None
 
-    @discord.ui.button(label="✅ Yes, use this game info", style=discord.ButtonStyle.green)
+        # Build select options from games
+        options = []
+        for i, game in enumerate(games[:5]):
+            name = game.get("name", "Unknown")[:100]
+            # Get release year if available
+            release_date = game.get("first_release_date")
+            if release_date:
+                from datetime import datetime
+                year = datetime.fromtimestamp(release_date).year
+                desc = f"Released: {year}"
+            else:
+                desc = "Release date unknown"
+            options.append(discord.SelectOption(
+                label=name,
+                value=str(i),
+                description=desc[:100]
+            ))
+
+        # Add the select menu
+        select = discord.ui.Select(
+            placeholder="Select the correct game...",
+            options=options,
+            row=0
+        )
+        select.callback = self.game_selected
+        self.add_item(select)
+
+    async def game_selected(self, interaction: discord.Interaction):
+        """Handle game selection from dropdown."""
+        select = interaction.data.get("values", [])
+        if select:
+            idx = int(select[0])
+            self.selected_game = self.games[idx]
+
+            game_name = self.selected_game.get("name", "Unknown")
+            await interaction.response.send_message(
+                f"✅ Selected: **{game_name}**\n\nNow click **Use Selected Game** to continue.",
+                ephemeral=True
+            )
+
+    @discord.ui.button(label="✅ Use Selected Game", style=discord.ButtonStyle.green, row=1)
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Confirm the IGDB match and proceed to options."""
+        """Confirm the selected game and proceed to options."""
+        if not self.selected_game:
+            await interaction.response.send_message(
+                "Please select a game from the dropdown first.",
+                ephemeral=True
+            )
+            return
+
         # Store IGDB data in pending_data
-        self.pending_data["igdb_data"] = self.game_data
+        self.pending_data["igdb_data"] = self.selected_game
 
         # Show the options view
         view = GiveawayOptionsView(self.cog, self.pending_data, self.guild)
         await interaction.response.edit_message(
             content="**Step 2: Configure Entry Requirements & Bonuses**\n\n"
-                    "✅ *Game info from IGDB will be included*\n\n"
+                    f"✅ *Game info for **{self.selected_game.get('name')}** will be included*\n\n"
                     "• **Required Roles (AND):** User must have ALL selected roles\n"
                     "• **Optional Roles (OR):** User must have at least ONE selected role\n"
                     "• **Bonus Roles:** Grant +1 entry each\n\n"
@@ -875,7 +920,7 @@ class IGDBConfirmThenOptionsView(discord.ui.View):
         )
         self.stop()
 
-    @discord.ui.button(label="❌ Skip game info", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="❌ Skip game info", style=discord.ButtonStyle.secondary, row=1)
     async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Skip IGDB data and proceed to options."""
         self.pending_data["igdb_data"] = None
@@ -1297,8 +1342,8 @@ class ShadyGiveaway(commands.Cog):
             log.error(f"Error getting IGDB token: {e}")
             return None
 
-    async def search_igdb(self, guild_id: int, game_name: str) -> Optional[Dict[str, Any]]:
-        """Search IGDB for a game by name."""
+    async def search_igdb(self, guild_id: int, game_name: str) -> Optional[List[Dict[str, Any]]]:
+        """Search IGDB for games by name. Returns up to 5 results."""
         token = await self.get_igdb_token(guild_id)
         if not token:
             return None
@@ -1325,7 +1370,7 @@ class ShadyGiveaway(commands.Cog):
                         log.error(f"IGDB search failed: {resp.status}")
                         return None
                     games = await resp.json()
-                    return games[0] if games else None
+                    return games if games else None
 
         except Exception as e:
             log.error(f"Error searching IGDB: {e}")
