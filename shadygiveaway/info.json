@@ -1,0 +1,14 @@
+{
+    "author": ["ShadyTidus"],
+    "install_msg": "Thanks for installing ShadyGiveaway!\n\nUse `/giveaway create` to start a giveaway.\nWinners must claim prizes by clicking Yes within the timeout period.\nUse `/giveaway list` to see active giveaways.",
+    "name": "ShadyGiveaway",
+    "short": "Advanced giveaway system with prize codes and claim verification",
+    "description": "A comprehensive giveaway system with prize code management, claim verification via Yes/No buttons, automatic rerolls on timeout/decline, role requirements, and multiple winner support. Winners must actively claim prizes within a timeout period or the prize is rerolled to the next participant.",
+    "end_user_data_statement": "This cog stores user IDs for giveaway participants, winner data, and timestamps. Data is automatically cleaned up when giveaways end.",
+    "tags": ["giveaway", "events", "community", "prizes", "engagement"],
+    "requirements": ["cryptography"],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
+}
