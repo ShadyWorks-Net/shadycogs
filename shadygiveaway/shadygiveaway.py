@@ -952,6 +952,195 @@ class IGDBConfirmView(discord.ui.View):
         self.stop()
 
 
+class TemplateGiveawayModal(discord.ui.Modal, title="Create Giveaway from Template"):
+    """Modal for creating a giveaway from a template - just needs prize info."""
+
+    prize_description = discord.ui.TextInput(
+        label="Prize Name & Description",
+        style=discord.TextStyle.paragraph,
+        placeholder="Line 1: Prize name\nLine 2+: Optional description",
+        required=True,
+        max_length=500,
+    )
+
+    prize_code = discord.ui.TextInput(
+        label="Prize Code/Key",
+        placeholder="Code that winners will receive in DM",
+        required=True,
+        max_length=500,
+    )
+
+    def __init__(self, cog: "ShadyGiveaway", template: Dict[str, Any], template_name: str):
+        super().__init__()
+        self.cog = cog
+        self.template = template
+        self.template_name = template_name
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            channel = interaction.channel
+            if not isinstance(channel, discord.TextChannel):
+                await interaction.response.send_message(
+                    "This command must be run in a text channel!",
+                    ephemeral=True
+                )
+                return
+
+            # Parse template values
+            duration_str = self.template.get("duration", "24h")
+            duration_delta = await self.cog.parse_duration(duration_str)
+            if duration_delta is None:
+                duration_delta = timedelta(hours=24)
+
+            claim_timeout_str = self.template.get("claim_timeout", "1h")
+            claim_timeout_delta = await self.cog.parse_duration(claim_timeout_str)
+            if claim_timeout_delta is None:
+                claim_timeout_delta = timedelta(hours=1)
+
+            # Parse prize name and description
+            full_text = str(self.prize_description)
+            if "\n" in full_text:
+                prize_name, description = full_text.split("\n", 1)
+                prize_name = prize_name.strip()
+                description = description.strip()
+            else:
+                prize_name = full_text.strip()
+                description = ""
+
+            # Build pending data from template
+            pending_data = {
+                "channel_id": channel.id,
+                "prize_name": prize_name,
+                "description": description,
+                "duration_seconds": int(duration_delta.total_seconds()),
+                "winners_count": self.template.get("winners_count", 1),
+                "prize_code": str(self.prize_code),
+                "claim_timeout_seconds": int(claim_timeout_delta.total_seconds()),
+                "max_entries": None,
+                "igdb_data": None,
+            }
+
+            # Get role requirements from template
+            required_roles = self.template.get("required_roles", [])
+            optional_roles = self.template.get("optional_roles", [])
+            nitro_bonus = self.template.get("nitro_bonus", False)
+            special_bonus_role = self.template.get("special_bonus_role_id")
+
+            # Create the giveaway directly
+            await self.cog.create_giveaway(
+                interaction,
+                pending_data,
+                required_roles,
+                optional_roles,
+                nitro_bonus,
+                special_bonus_role,
+                None  # No scheduled start
+            )
+
+        except Exception as e:
+            error_msg = f"**Error:**\n```\n{type(e).__name__}: {str(e)}\n```"
+            if not interaction.response.is_done():
+                await interaction.response.send_message(error_msg, ephemeral=True)
+            else:
+                await interaction.followup.send(error_msg, ephemeral=True)
+            log.error(f"Error in template giveaway modal: {e}", exc_info=True)
+
+
+class SaveTemplateModal(discord.ui.Modal, title="Save Custom Template"):
+    """Modal for saving a custom giveaway template."""
+
+    description = discord.ui.TextInput(
+        label="Template Description",
+        placeholder="What is this template for?",
+        required=True,
+        max_length=100,
+    )
+
+    duration = discord.ui.TextInput(
+        label="Duration",
+        placeholder="e.g., 24h, 3d, 1w",
+        required=True,
+        max_length=20,
+    )
+
+    winners_count = discord.ui.TextInput(
+        label="Number of Winners",
+        placeholder="1",
+        required=True,
+        max_length=2,
+    )
+
+    claim_timeout = discord.ui.TextInput(
+        label="Claim Timeout",
+        placeholder="e.g., 1h, 30m",
+        required=True,
+        max_length=20,
+    )
+
+    def __init__(self, cog: "ShadyGiveaway", name: str):
+        super().__init__()
+        self.cog = cog
+        self.name = name
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            # Validate inputs
+            duration_delta = await self.cog.parse_duration(str(self.duration))
+            if duration_delta is None:
+                await interaction.response.send_message(
+                    "Invalid duration format.",
+                    ephemeral=True
+                )
+                return
+
+            claim_delta = await self.cog.parse_duration(str(self.claim_timeout))
+            if claim_delta is None:
+                await interaction.response.send_message(
+                    "Invalid claim timeout format.",
+                    ephemeral=True
+                )
+                return
+
+            try:
+                winners = int(str(self.winners_count))
+                if winners < 1 or winners > 20:
+                    raise ValueError
+            except ValueError:
+                await interaction.response.send_message(
+                    "Winners must be between 1 and 20.",
+                    ephemeral=True
+                )
+                return
+
+            # Save template
+            template = {
+                "description": str(self.description),
+                "duration": str(self.duration),
+                "winners_count": winners,
+                "claim_timeout": str(self.claim_timeout),
+                "required_roles": [],
+                "optional_roles": [],
+                "nitro_bonus": False,
+            }
+
+            async with self.cog.config.guild(interaction.guild).custom_templates() as templates:
+                templates[self.name] = template
+
+            await interaction.response.send_message(
+                f"✅ Saved custom template `{self.name}`!\n"
+                f"Duration: {self.duration} | Winners: {winners} | Claim: {self.claim_timeout}",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            error_msg = f"**Error:**\n```\n{type(e).__name__}: {str(e)}\n```"
+            if not interaction.response.is_done():
+                await interaction.response.send_message(error_msg, ephemeral=True)
+            else:
+                await interaction.followup.send(error_msg, ephemeral=True)
+            log.error(f"Error saving template: {e}", exc_info=True)
+
+
 class ShadyGiveaway(commands.Cog):
     """Advanced giveaway system with prize code management and claim verification."""
 
@@ -2131,193 +2320,6 @@ class ShadyGiveaway(commands.Cog):
             f"✅ Deleted custom template `{name}`.",
             ephemeral=True
         )
-
-
-class TemplateGiveawayModal(discord.ui.Modal, title="Create Giveaway from Template"):
-    """Modal for creating a giveaway from a template - just needs prize info."""
-
-    prize_description = discord.ui.TextInput(
-        label="Prize Name & Description",
-        style=discord.TextStyle.paragraph,
-        placeholder="Line 1: Prize name\nLine 2+: Optional description",
-        required=True,
-        max_length=500,
-    )
-
-    prize_code = discord.ui.TextInput(
-        label="Prize Code/Key",
-        placeholder="Code that winners will receive in DM",
-        required=True,
-        max_length=500,
-    )
-
-    def __init__(self, cog: "ShadyGiveaway", template: Dict[str, Any], template_name: str):
-        super().__init__()
-        self.cog = cog
-        self.template = template
-        self.template_name = template_name
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            channel = interaction.channel
-            if not isinstance(channel, discord.TextChannel):
-                await interaction.response.send_message(
-                    "This command must be run in a text channel!",
-                    ephemeral=True
-                )
-                return
-
-            # Parse template values
-            duration_str = self.template.get("duration", "24h")
-            duration_delta = await self.cog.parse_duration(duration_str)
-            if duration_delta is None:
-                duration_delta = timedelta(hours=24)
-
-            claim_timeout_str = self.template.get("claim_timeout", "1h")
-            claim_timeout_delta = await self.cog.parse_duration(claim_timeout_str)
-            if claim_timeout_delta is None:
-                claim_timeout_delta = timedelta(hours=1)
-
-            # Parse prize name and description
-            full_text = str(self.prize_description)
-            if "\n" in full_text:
-                prize_name, description = full_text.split("\n", 1)
-                prize_name = prize_name.strip()
-                description = description.strip()
-            else:
-                prize_name = full_text.strip()
-                description = ""
-
-            # Build pending data from template
-            pending_data = {
-                "channel_id": channel.id,
-                "prize_name": prize_name,
-                "description": description,
-                "duration_seconds": int(duration_delta.total_seconds()),
-                "winners_count": self.template.get("winners_count", 1),
-                "prize_code": str(self.prize_code),
-                "claim_timeout_seconds": int(claim_timeout_delta.total_seconds()),
-            }
-
-            # Get role requirements from template
-            required_roles = self.template.get("required_roles", [])
-            optional_roles = self.template.get("optional_roles", [])
-            nitro_bonus = self.template.get("nitro_bonus", False)
-            special_bonus_role = self.template.get("special_bonus_role_id")
-
-            # Create the giveaway directly
-            await self.cog.create_giveaway(
-                interaction,
-                pending_data,
-                required_roles,
-                optional_roles,
-                nitro_bonus,
-                special_bonus_role,
-                None  # No scheduled start
-            )
-
-        except Exception as e:
-            error_msg = f"**Error:**\n```\n{type(e).__name__}: {str(e)}\n```"
-            if not interaction.response.is_done():
-                await interaction.response.send_message(error_msg, ephemeral=True)
-            else:
-                await interaction.followup.send(error_msg, ephemeral=True)
-            log.error(f"Error in template giveaway modal: {e}", exc_info=True)
-
-
-class SaveTemplateModal(discord.ui.Modal, title="Save Custom Template"):
-    """Modal for saving a custom giveaway template."""
-
-    description = discord.ui.TextInput(
-        label="Template Description",
-        placeholder="What is this template for?",
-        required=True,
-        max_length=100,
-    )
-
-    duration = discord.ui.TextInput(
-        label="Duration",
-        placeholder="e.g., 24h, 3d, 1w",
-        required=True,
-        max_length=20,
-    )
-
-    winners_count = discord.ui.TextInput(
-        label="Number of Winners",
-        placeholder="1",
-        required=True,
-        max_length=2,
-    )
-
-    claim_timeout = discord.ui.TextInput(
-        label="Claim Timeout",
-        placeholder="e.g., 1h, 30m",
-        required=True,
-        max_length=20,
-    )
-
-    def __init__(self, cog: "ShadyGiveaway", name: str):
-        super().__init__()
-        self.cog = cog
-        self.name = name
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            # Validate inputs
-            duration_delta = await self.cog.parse_duration(str(self.duration))
-            if duration_delta is None:
-                await interaction.response.send_message(
-                    "Invalid duration format.",
-                    ephemeral=True
-                )
-                return
-
-            claim_delta = await self.cog.parse_duration(str(self.claim_timeout))
-            if claim_delta is None:
-                await interaction.response.send_message(
-                    "Invalid claim timeout format.",
-                    ephemeral=True
-                )
-                return
-
-            try:
-                winners = int(str(self.winners_count))
-                if winners < 1 or winners > 20:
-                    raise ValueError
-            except ValueError:
-                await interaction.response.send_message(
-                    "Winners must be between 1 and 20.",
-                    ephemeral=True
-                )
-                return
-
-            # Save template
-            template = {
-                "description": str(self.description),
-                "duration": str(self.duration),
-                "winners_count": winners,
-                "claim_timeout": str(self.claim_timeout),
-                "required_roles": [],
-                "optional_roles": [],
-                "nitro_bonus": False,
-            }
-
-            async with self.cog.config.guild(interaction.guild).custom_templates() as templates:
-                templates[self.name] = template
-
-            await interaction.response.send_message(
-                f"✅ Saved custom template `{self.name}`!\n"
-                f"Duration: {self.duration} | Winners: {winners} | Claim: {self.claim_timeout}",
-                ephemeral=True
-            )
-
-        except Exception as e:
-            error_msg = f"**Error:**\n```\n{type(e).__name__}: {str(e)}\n```"
-            if not interaction.response.is_done():
-                await interaction.response.send_message(error_msg, ephemeral=True)
-            else:
-                await interaction.followup.send(error_msg, ephemeral=True)
-            log.error(f"Error saving template: {e}", exc_info=True)
 
     @app_commands.command(name="giveaway", description="Create or list giveaways")
     @app_commands.describe(action="Action to perform")
