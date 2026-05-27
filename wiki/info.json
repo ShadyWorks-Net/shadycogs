@@ -1,0 +1,11 @@
+{
+  "author": ["ShadyTidus"],
+  "description": "Community Wiki Helper with slash command support: server rules, hosting guidelines, colors/levels info, channel access help, and content promotion guidance. From ShadyCogs collection.",
+  "install_msg": "Thanks for installing the Wiki Cog from ShadyCogs! Use `[p]wikiset` to configure authorized roles. Slash commands: `/rule`, `/host`, `/hosted`, `/colors`, `/noaccess`, `/promote`.",
+  "name": "wiki",
+  "short": "Wiki helper with rules and server info commands.",
+  "requirements": [],
+  "tags": ["community", "wiki", "discord", "rules", "slash-commands"],
+  "type": "COG",
+  "hidden": false
+}

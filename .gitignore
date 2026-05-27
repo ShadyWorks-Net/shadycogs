@@ -25,7 +25,6 @@ nul
 test_cogs.py
 
 # Private/PA-only cogs (not for public release)
-wiki/
 karaoke/
 
 # Deprecated/renamed cogs (kept locally for reference)

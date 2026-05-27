@@ -1,0 +1,1 @@
+from .wiki_cog import setup
