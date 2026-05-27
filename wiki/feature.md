@@ -76,12 +76,12 @@ Wiki provides quick-access commands for moderators to share server rules, hostin
 > **:gandalf_bouncy: 6) Use Our Channels & Roles Properly**
 > Use our roles & channels correctly by posting in the right places.
 > Abusing role pings to promote yourself is prohibited.
-> If you're unsure, double check Channels & Roles and THEN ask staff in ❓・server-questions first BEFORE posting!
+> If you're unsure, double check Channels & Roles and THEN ask staff in #server-questions first BEFORE posting!
 
 ### Rule 7 - Promoting Content
 > **📹 7) Promoting Content**
-> Only post content (streaming links & clips) in 🚨・promote-content or 🤙・clip-sharing.
-> Want to collaborate with PA? Apply here! 🥖・applications
+> Only post content (streaming links & clips) in #promote-content or #clip-sharing.
+> Want to collaborate with PA? Apply here! #applications
 
 ### Rule 8 - Crowdfunding
 > **🫰 8) Crowdfunding and Solicitation**
@@ -92,7 +92,7 @@ Wiki provides quick-access commands for moderators to share server rules, hostin
 ### Rule 9 - Unauthorized Links
 > **❌ 9) Unauthorized Links are Not Allowed!**
 > Don't post/advertise or DM Discord server, guild/clan invites, game server links, or data collection links (surveys, questionaries, etc.). It's a safety risk.
-> Game servers are allowed to be posted only after passing our vetting process! 🥖・applications
+> Game servers are allowed to be posted only after passing our vetting process! #applications
 
 ### Rule 10 - Build-A-VC Names
 > **📝 10) Build-A-VC Channel Names**
@@ -101,7 +101,7 @@ Wiki provides quick-access commands for moderators to share server rules, hostin
 ### Rule 11 - Staff Respect
 > **:GES_DiscordStaff: 11) Staff Respect & Jurisdiction**
 > Staff volunteer their personal time to make this a great place, please treat them with respect!
-> "Mini-Modding" is prohibited, 🚨・contact-staff if something requires staff attention. If you disagree with a staff decision, open a ticket.
+> "Mini-Modding" is prohibited, #contact-staff if something requires staff attention. If you disagree with a staff decision, open a ticket.
 > Altercations outside of Parental Advisory will not be handled by Parental Advisory Staff. We ask you to keep personal matters outside of the server.
 
 ## Permissions

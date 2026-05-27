@@ -60,15 +60,15 @@ class Wiki(commands.Cog):
                 "text": (
                     "Use our roles & channels correctly by posting in the right places.\n"
                     "Abusing role pings to promote yourself is prohibited.\n"
-                    "If you're unsure, double check Channels & Roles and THEN ask staff in ❓・server-questions "
+                    "If you're unsure, double check Channels & Roles and THEN ask staff in <#1036975234202472568> "
                     "first BEFORE posting!"
                 ),
             },
             "7": {
                 "title": "📹 7) Promoting Content",
                 "text": (
-                    "Only post content (streaming links & clips) in 🚨・promote-content or 🤙・clip-sharing.\n"
-                    "Want to collaborate with PA? Apply here! 🥖・applications"
+                    "Only post content (streaming links & clips) in <#1038166649657893004> or <#933289669561581588>.\n"
+                    "Want to collaborate with PA? Apply here! <#693601096467218523>"
                 ),
             },
             "8": {
@@ -84,7 +84,7 @@ class Wiki(commands.Cog):
                 "text": (
                     "Don't post/advertise or DM Discord server, guild/clan invites, game server links, "
                     "or data collection links (surveys, questionaries, etc.). It's a safety risk.\n"
-                    "Game servers are allowed to be posted only after passing our vetting process! 🥖・applications"
+                    "Game servers are allowed to be posted only after passing our vetting process! <#693601096467218523>"
                 ),
             },
             "10": {
@@ -95,7 +95,7 @@ class Wiki(commands.Cog):
                 "title": ":GES_DiscordStaff: 11) Staff Respect & Jurisdiction",
                 "text": (
                     "Staff volunteer their personal time to make this a great place, please treat them with respect!\n"
-                    '"Mini-Modding" is prohibited, 🚨・contact-staff if something requires staff attention. '
+                    '"Mini-Modding" is prohibited, <#1054444547050053744> if something requires staff attention. '
                     "If you disagree with a staff decision, open a ticket.\n"
                     "Altercations outside of Parental Advisory will not be handled by Parental Advisory Staff. "
                     "We ask you to keep personal matters outside of the server."
