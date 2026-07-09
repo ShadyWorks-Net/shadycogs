@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 import discord
 from discord import app_commands
@@ -12,15 +12,35 @@ log = logging.getLogger("red.shadycogs.shadysuggest")
 
 CONFIG_IDENTIFIER = 260288776360820740
 
-# status -> (embed color, display label)
+# status -> (embed color, display label, DM verb)
 STATUS_META = {
-    "open": (discord.Color.blurple(), "🟦 Open"),
-    "approved": (discord.Color.green(), "✅ Approved"),
-    "denied": (discord.Color.red(), "⛔ Denied"),
-    "implemented": (discord.Color.gold(), "🌟 Implemented"),
+    "open": (discord.Color.blurple(), "🟦 Open", "submitted"),
+    "approved": (discord.Color.green(), "✅ Approved", "approved"),
+    "denied": (discord.Color.red(), "⛔ Denied", "denied"),
+    "implemented": (discord.Color.gold(), "🌟 Implemented", "marked as implemented"),
 }
 
 _TRUTHY = {"y", "yes", "true", "1", "anon", "anonymous", "on"}
+
+
+async def suggestion_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> List[app_commands.Choice[str]]:
+    """Autocomplete over the guild's suggestions, showing '#id — title'."""
+    cog = interaction.client.get_cog("ShadySuggest")
+    if cog is None or interaction.guild is None:
+        return []
+    suggestions = await cog.config.guild(interaction.guild).suggestions()
+    items = sorted(suggestions.values(), key=lambda r: r["id"], reverse=True)
+    cur = current.lower().lstrip("#")
+    choices: List[app_commands.Choice[str]] = []
+    for rec in items:
+        label = f"#{rec['id']} — {rec['title']}"
+        if cur in label.lower() or cur in str(rec["id"]):
+            choices.append(app_commands.Choice(name=label[:100], value=str(rec["id"])))
+        if len(choices) >= 25:
+            break
+    return choices
 
 
 # ==================== UI COMPONENTS ====================
@@ -71,32 +91,133 @@ class SuggestModal(discord.ui.Modal, title="New Suggestion"):
                 )
 
 
-class SuggestVoteView(discord.ui.View):
-    """Persistent view with green/red vote buttons on each open suggestion."""
+class StaffActionModal(discord.ui.Modal):
+    """Modal collecting the reason (status change) or note text for a staff action."""
+
+    def __init__(self, cog: "ShadySuggest", sid: int, action: str) -> None:
+        titles = {
+            "approved": "Approve",
+            "denied": "Deny",
+            "implemented": "Implement",
+            "note": "Add Note",
+        }
+        super().__init__(title=f"{titles[action]} — Suggestion #{sid}")
+        self.cog = cog
+        self.sid = sid
+        self.action = action
+        if action == "note":
+            self.text_input = discord.ui.TextInput(
+                label="Note",
+                placeholder="Public note shown on the suggestion",
+                style=discord.TextStyle.paragraph,
+                max_length=1000,
+                required=True,
+            )
+        else:
+            self.text_input = discord.ui.TextInput(
+                label="Reason / staff response (optional)",
+                placeholder="Shown to the submitter and on the suggestion",
+                style=discord.TextStyle.paragraph,
+                max_length=1000,
+                required=False,
+            )
+        self.add_item(self.text_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        text = self.text_input.value
+        if self.action == "note":
+            await self.cog.apply_note(interaction, self.sid, text)
+        else:
+            await self.cog.apply_status(interaction, self.sid, self.action, text)
+
+
+class StaffPanelView(discord.ui.View):
+    """Ephemeral, staff-only panel opened from the Manage button."""
+
+    def __init__(self, cog: "ShadySuggest", sid: int) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.sid = sid
+
+    @discord.ui.button(label="Approve", emoji="✅", style=discord.ButtonStyle.green)
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            StaffActionModal(self.cog, self.sid, "approved")
+        )
+
+    @discord.ui.button(label="Deny", emoji="⛔", style=discord.ButtonStyle.red)
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            StaffActionModal(self.cog, self.sid, "denied")
+        )
+
+    @discord.ui.button(label="Implemented", emoji="🌟", style=discord.ButtonStyle.blurple)
+    async def implement(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            StaffActionModal(self.cog, self.sid, "implemented")
+        )
+
+    @discord.ui.button(label="Note", emoji="📝", style=discord.ButtonStyle.secondary)
+    async def note(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            StaffActionModal(self.cog, self.sid, "note")
+        )
+
+
+class SuggestBoardView(discord.ui.View):
+    """Persistent view on an OPEN suggestion: vote buttons + Manage."""
 
     def __init__(self, cog: Optional["ShadySuggest"] = None) -> None:
         super().__init__(timeout=None)
         self.cog = cog
 
     @discord.ui.button(
-        emoji="✅", style=discord.ButtonStyle.green, custom_id="shady_suggest:up"
+        label="Upvote",
+        emoji="👍",
+        style=discord.ButtonStyle.green,
+        custom_id="shady_suggest:up",
     )
     async def upvote(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._vote(interaction, "up")
 
     @discord.ui.button(
-        emoji="❌", style=discord.ButtonStyle.red, custom_id="shady_suggest:down"
+        label="Downvote",
+        emoji="👎",
+        style=discord.ButtonStyle.red,
+        custom_id="shady_suggest:down",
     )
     async def downvote(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._vote(interaction, "down")
 
+    @discord.ui.button(
+        label="Manage",
+        emoji="⚙️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="shady_suggest:manage",
+    )
+    async def manage(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.cog:
+            await interaction.response.send_message(
+                "Suggestions are still loading, please try again in a moment.",
+                ephemeral=True,
+            )
+            return
+        sid = _sid_from_message(interaction)
+        if sid is None:
+            await interaction.response.send_message(
+                "Couldn't identify this suggestion.", ephemeral=True
+            )
+            return
+        await self.cog.handle_manage(interaction, sid)
+
     async def _vote(self, interaction: discord.Interaction, direction: str) -> None:
         if not self.cog:
             await interaction.response.send_message(
-                "Suggestions are still loading, please try again in a moment.", ephemeral=True
+                "Suggestions are still loading, please try again in a moment.",
+                ephemeral=True,
             )
             return
-        sid = self._sid_from_message(interaction)
+        sid = _sid_from_message(interaction)
         if sid is None:
             await interaction.response.send_message(
                 "Couldn't identify this suggestion.", ephemeral=True
@@ -104,17 +225,83 @@ class SuggestVoteView(discord.ui.View):
             return
         await self.cog.handle_vote(interaction, sid, direction)
 
-    @staticmethod
-    def _sid_from_message(interaction: discord.Interaction) -> Optional[int]:
-        if not interaction.message or not interaction.message.embeds:
-            return None
-        footer = interaction.message.embeds[0].footer
-        if footer and footer.text and footer.text.startswith("Suggestion ID: "):
+
+class ArchivedManageView(discord.ui.View):
+    """Persistent view on an ARCHIVED suggestion: Manage only (no voting)."""
+
+    def __init__(self, cog: Optional["ShadySuggest"] = None) -> None:
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(
+        label="Manage",
+        emoji="⚙️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="shady_suggest:manage",
+    )
+    async def manage(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = self.cog or interaction.client.get_cog("ShadySuggest")
+        if cog is None:
+            await interaction.response.send_message(
+                "Suggestions are still loading, please try again in a moment.",
+                ephemeral=True,
+            )
+            return
+        sid = _sid_from_message(interaction)
+        if sid is None:
+            await interaction.response.send_message(
+                "Couldn't identify this suggestion.", ephemeral=True
+            )
+            return
+        await cog.handle_manage(interaction, sid)
+
+
+class RevealPaginator(discord.ui.View):
+    """Ephemeral Prev/Next paginator for long reveal voter lists."""
+
+    def __init__(self, pages: list, timeout: float = 180) -> None:
+        super().__init__(timeout=timeout)
+        self.pages = pages
+        self.index = 0
+        self.message: Optional[discord.Message] = None
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        self.prev_button.disabled = self.index == 0
+        self.next_button.disabled = self.index >= len(self.pages) - 1
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index = max(0, self.index - 1)
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index = min(len(self.pages) - 1, self.index + 1)
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+
+    async def on_timeout(self) -> None:
+        if self.message:
+            for child in self.children:
+                child.disabled = True
             try:
-                return int(footer.text.replace("Suggestion ID: ", "").strip())
-            except ValueError:
-                return None
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
+def _sid_from_message(interaction: discord.Interaction) -> Optional[int]:
+    if not interaction.message or not interaction.message.embeds:
         return None
+    footer = interaction.message.embeds[0].footer
+    if footer and footer.text and footer.text.startswith("Suggestion ID: "):
+        try:
+            return int(footer.text.replace("Suggestion ID: ", "").strip())
+        except ValueError:
+            return None
+    return None
 
 
 # ==================== MAIN COG ====================
@@ -123,7 +310,7 @@ class SuggestVoteView(discord.ui.View):
 class ShadySuggest(commands.Cog):
     """Suggestion board with anonymous voting and staff triage."""
 
-    __version__ = "1.0.0"
+    __version__ = "1.1.0"
     __author__ = "ShadyTidus"
 
     def __init__(self, bot: Red) -> None:
@@ -141,6 +328,7 @@ class ShadySuggest(commands.Cog):
             "participant_min_role": None,
             "staff_min_role": None,
             "vote_blocklist_roles": [],
+            "dm_notify": True,
             "next_id": 1,
             "suggestions": {},
         }
@@ -148,8 +336,10 @@ class ShadySuggest(commands.Cog):
         self._id_lock = asyncio.Lock()
 
     async def cog_load(self) -> None:
-        # Register the persistent view so vote buttons survive restarts.
-        self.bot.add_view(SuggestVoteView(cog=self))
+        # Register persistent views so vote/manage buttons survive restarts.
+        # Both views share the 'shady_suggest:manage' custom_id; registering
+        # SuggestBoardView covers up/down/manage for every message.
+        self.bot.add_view(SuggestBoardView(cog=self))
 
     # -------------------- authorization helpers --------------------
 
@@ -201,7 +391,7 @@ class ShadySuggest(commands.Cog):
             return False
         return self._meets_min_role(member, min_role_id, guild)
 
-    async def _require_staff(self, ctx: commands.Context) -> bool:
+    async def _require_staff_ctx(self, ctx: commands.Context) -> bool:
         if not await self.is_staff(ctx.author, ctx.guild):
             await ctx.send(
                 "You don't have permission to manage suggestions.", ephemeral=True
@@ -212,7 +402,7 @@ class ShadySuggest(commands.Cog):
     # -------------------- embed / rendering --------------------
 
     def build_embed(self, rec: dict, guild: discord.Guild) -> discord.Embed:
-        color, status_label = STATUS_META.get(rec["status"], STATUS_META["open"])
+        color, status_label, _ = STATUS_META.get(rec["status"], STATUS_META["open"])
         embed = discord.Embed(
             title=f"Suggestion #{rec['id']}: {rec['title']}",
             description=rec["details"],
@@ -237,7 +427,7 @@ class ShadySuggest(commands.Cog):
         sign = "+" if score >= 0 else ""
         embed.add_field(
             name="Votes",
-            value=f"✅ {up}   ❌ {down}   ·   Score: {sign}{score}",
+            value=f"👍 {up}   👎 {down}   ·   Score: {sign}{score}",
             inline=False,
         )
 
@@ -257,7 +447,7 @@ class ShadySuggest(commands.Cog):
         return embed
 
     async def _refresh_open_embed(self, guild: discord.Guild, rec: dict) -> None:
-        """Edit the live post-channel embed in place (keeps vote buttons)."""
+        """Edit the live post-channel embed in place (keeps vote/manage buttons)."""
         channel = guild.get_channel(rec["channel_id"])
         if channel is None:
             return
@@ -268,7 +458,7 @@ class ShadySuggest(commands.Cog):
             pass
 
     async def _edit_archived(self, guild: discord.Guild, rec: dict) -> None:
-        """Edit an already-archived embed in place (no buttons)."""
+        """Edit an already-archived embed in place (keeps the Manage button)."""
         channel = guild.get_channel(rec["channel_id"])
         if channel is None:
             return
@@ -279,28 +469,28 @@ class ShadySuggest(commands.Cog):
             pass
 
     async def _resolve_in_place(self, guild: discord.Guild, rec: dict) -> None:
-        """Fallback when no archive channel: strip buttons in the post channel."""
+        """Fallback when no archive channel: drop voting, keep Manage, in the post channel."""
         channel = guild.get_channel(rec["channel_id"])
         if channel is None:
             return
         try:
             message = await channel.fetch_message(rec["message_id"])
-            await message.edit(embed=self.build_embed(rec, guild), view=None)
+            await message.edit(
+                embed=self.build_embed(rec, guild), view=ArchivedManageView(cog=self)
+            )
         except discord.NotFound:
             pass
 
     async def _move_to_archive(self, guild: discord.Guild, rec: dict) -> bool:
-        """Repost the (button-less) embed to the archive channel and delete original.
-
-        Returns False if no archive channel is configured. Mutates rec's
-        message_id/channel_id/archived so the caller persists the new location.
-        """
+        """Repost the embed (Manage only) to the archive channel and delete the original."""
         archive_id = await self.config.guild(guild).archive_channel()
         archive_channel = guild.get_channel(archive_id) if archive_id else None
         if archive_channel is None:
             return False
 
-        new_msg = await archive_channel.send(embed=self.build_embed(rec, guild))
+        new_msg = await archive_channel.send(
+            embed=self.build_embed(rec, guild), view=ArchivedManageView(cog=self)
+        )
 
         old_channel = guild.get_channel(rec["channel_id"])
         if old_channel:
@@ -326,6 +516,81 @@ class ShadySuggest(commands.Cog):
             await ch.send(text)
         except discord.Forbidden:
             pass
+
+    # -------------------- DM notifications --------------------
+
+    async def _resolve_author(self, guild: discord.Guild, rec: dict):
+        author = guild.get_member(rec["author_id"])
+        if author is not None:
+            return author
+        try:
+            return await self.bot.fetch_user(rec["author_id"])
+        except discord.HTTPException:
+            return None
+
+    async def _dm(self, guild: discord.Guild, rec: dict, embed: discord.Embed) -> None:
+        if not await self.config.guild(guild).dm_notify():
+            return
+        author = await self._resolve_author(guild, rec)
+        if author is None:
+            return
+        embed.set_author(
+            name=guild.name, icon_url=guild.icon.url if guild.icon else None
+        )
+        embed.set_footer(text=f"Guild ID: {guild.id} | sID: #{rec['id']}")
+        embed.timestamp = datetime.now(timezone.utc)
+        try:
+            await author.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def _dm_submitted(
+        self, guild: discord.Guild, rec: dict, post_channel: discord.TextChannel
+    ) -> None:
+        author = await self._resolve_author(guild, rec)
+        mention = author.mention if author else "there"
+        embed = discord.Embed(
+            description=(
+                f"Hey {mention}. Your suggestion has been sent to "
+                f"{post_channel.mention} to be voted on!\n\n"
+                "Please wait until it gets approved or rejected by a staff member.\n\n"
+                f"Your suggestion ID (sID) for reference is **#{rec['id']}**."
+            ),
+            color=discord.Color.blurple(),
+        )
+        await self._dm(guild, rec, embed)
+
+    async def _dm_status(
+        self,
+        guild: discord.Guild,
+        rec: dict,
+        status: str,
+        actor: discord.abc.User,
+        reason: Optional[str],
+    ) -> None:
+        author = await self._resolve_author(guild, rec)
+        mention = author.mention if author else "there"
+        color, _, verb = STATUS_META.get(status, STATUS_META["open"])
+        desc = f"Hey {mention}. Your suggestion has been **{verb}** by {actor.mention}!"
+        if reason:
+            desc += f"\n\n**Staff Response:** {reason}"
+        desc += f"\n\nYour suggestion ID (sID) for reference was **#{rec['id']}**."
+        embed = discord.Embed(description=desc, color=color)
+        await self._dm(guild, rec, embed)
+
+    async def _dm_note(
+        self, guild: discord.Guild, rec: dict, note_text: str, actor: discord.abc.User
+    ) -> None:
+        author = await self._resolve_author(guild, rec)
+        mention = author.mention if author else "there"
+        embed = discord.Embed(
+            description=(
+                f"Hey {mention}. A staff note was added to your suggestion "
+                f"**#{rec['id']}** by {actor.mention}:\n\n{note_text}"
+            ),
+            color=discord.Color.blurple(),
+        )
+        await self._dm(guild, rec, embed)
 
     # -------------------- suggestion creation / voting --------------------
 
@@ -367,7 +632,7 @@ class ShadySuggest(commands.Cog):
         }
 
         message = await post_channel.send(
-            embed=self.build_embed(rec, guild), view=SuggestVoteView(cog=self)
+            embed=self.build_embed(rec, guild), view=SuggestBoardView(cog=self)
         )
         rec["message_id"] = message.id
 
@@ -383,6 +648,7 @@ class ShadySuggest(commands.Cog):
             f"📝 New suggestion **#{sid}** posted"
             + (" (anonymous)." if anonymous else f" by {interaction.user.mention}."),
         )
+        await self._dm_submitted(guild, rec, post_channel)
 
     async def handle_vote(
         self, interaction: discord.Interaction, sid: int, direction: str
@@ -408,21 +674,21 @@ class ShadySuggest(commands.Cog):
                 if direction == "up":
                     if uid in up:
                         up.remove(uid)
-                        msg = "Removed your ✅ vote."
+                        msg = "Removed your 👍 vote."
                     else:
                         up.append(uid)
                         if uid in down:
                             down.remove(uid)
-                        msg = "Recorded your ✅ vote."
+                        msg = "Recorded your 👍 vote."
                 else:
                     if uid in down:
                         down.remove(uid)
-                        msg = "Removed your ❌ vote."
+                        msg = "Removed your 👎 vote."
                     else:
                         down.append(uid)
                         if uid in up:
                             up.remove(uid)
-                        msg = "Recorded your ❌ vote."
+                        msg = "Recorded your 👎 vote."
                 await self._refresh_open_embed(guild, rec)
 
         if not open_for_voting:
@@ -431,6 +697,124 @@ class ShadySuggest(commands.Cog):
             )
             return
         await interaction.response.send_message(msg, ephemeral=True)
+
+    # -------------------- staff actions (shared by buttons + commands) --------------------
+
+    async def handle_manage(self, interaction: discord.Interaction, sid: int) -> None:
+        guild = interaction.guild
+        if not await self.is_staff(interaction.user, guild):
+            await interaction.response.send_message(
+                "You don't have permission to manage suggestions.", ephemeral=True
+            )
+            return
+        suggestions = await self.config.guild(guild).suggestions()
+        rec = suggestions.get(str(sid))
+        if not rec:
+            await interaction.response.send_message(
+                "That suggestion no longer exists.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            f"Manage suggestion **#{sid}: {rec['title']}**",
+            view=StaffPanelView(self, sid),
+            ephemeral=True,
+        )
+
+    async def apply_status(
+        self,
+        interaction: discord.Interaction,
+        sid: int,
+        status: str,
+        reason: Optional[str],
+    ) -> None:
+        guild = interaction.guild
+        if not await self.is_staff(interaction.user, guild):
+            await interaction.response.send_message(
+                "You don't have permission to manage suggestions.", ephemeral=True
+            )
+            return
+
+        reason = (reason or "").strip() or None
+        now = datetime.now(timezone.utc).isoformat()
+        found = True
+        warn = ""
+        snapshot = None
+
+        async with self.config.guild(guild).suggestions() as suggestions:
+            rec = suggestions.get(str(sid))
+            if not rec:
+                found = False
+            else:
+                rec["status"] = status
+                rec["status_by"] = interaction.user.id
+                rec["status_at"] = now
+                if reason:
+                    rec["notes"].append(
+                        {"author_id": interaction.user.id, "text": reason, "at": now}
+                    )
+                if rec["archived"]:
+                    await self._edit_archived(guild, rec)
+                else:
+                    moved = await self._move_to_archive(guild, rec)
+                    if not moved:
+                        await self._resolve_in_place(guild, rec)
+                        warn = " (archive channel not set — resolved in the post channel)"
+                snapshot = dict(rec)
+
+        if not found:
+            await interaction.response.send_message(
+                f"No suggestion **#{sid}** found.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            f"✅ Suggestion **#{sid}** marked **{status}**.{warn}", ephemeral=True
+        )
+        await self._log(
+            guild,
+            f"📌 {interaction.user.mention} set suggestion **#{sid}** to **{status}**."
+            + (f" Reason: {reason}" if reason else ""),
+        )
+        await self._dm_status(guild, snapshot, status, interaction.user, reason)
+
+    async def apply_note(
+        self, interaction: discord.Interaction, sid: int, text: str
+    ) -> None:
+        guild = interaction.guild
+        if not await self.is_staff(interaction.user, guild):
+            await interaction.response.send_message(
+                "You don't have permission to manage suggestions.", ephemeral=True
+            )
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        found = True
+        snapshot = None
+        async with self.config.guild(guild).suggestions() as suggestions:
+            rec = suggestions.get(str(sid))
+            if not rec:
+                found = False
+            else:
+                rec["notes"].append(
+                    {"author_id": interaction.user.id, "text": text, "at": now}
+                )
+                if rec["archived"]:
+                    await self._edit_archived(guild, rec)
+                else:
+                    await self._refresh_open_embed(guild, rec)
+                snapshot = dict(rec)
+
+        if not found:
+            await interaction.response.send_message(
+                f"No suggestion **#{sid}** found.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            f"✅ Note added to suggestion **#{sid}**.", ephemeral=True
+        )
+        await self._log(
+            guild, f"🗒️ {interaction.user.mention} noted on **#{sid}**: {text}"
+        )
+        await self._dm_note(guild, snapshot, text, interaction.user)
 
     # -------------------- user command --------------------
 
@@ -464,129 +848,111 @@ class ShadySuggest(commands.Cog):
 
         await interaction.response.send_modal(SuggestModal(self))
 
-    # -------------------- staff commands --------------------
+    # -------------------- staff commands (top-level, autocomplete + modal) --------------------
 
-    @commands.hybrid_group(name="suggestmod")
-    @commands.guild_only()
-    async def suggestmod(self, ctx: commands.Context) -> None:
-        """Staff actions for triaging suggestions."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
-
-    async def _change_status(
-        self, ctx: commands.Context, sid: int, status: str, reason: Optional[str]
+    async def _status_command_entry(
+        self, interaction: discord.Interaction, suggestion: str, status: str
     ) -> None:
-        if not await self._require_staff(ctx):
+        guild = interaction.guild
+        if not await self.is_staff(interaction.user, guild):
+            await interaction.response.send_message(
+                "You don't have permission to manage suggestions.", ephemeral=True
+            )
             return
-        guild = ctx.guild
-        now = datetime.now(timezone.utc).isoformat()
-        warn = ""
-        found = True
-
-        async with self.config.guild(guild).suggestions() as suggestions:
-            rec = suggestions.get(str(sid))
-            if not rec:
-                found = False
-            else:
-                rec["status"] = status
-                rec["status_by"] = ctx.author.id
-                rec["status_at"] = now
-                if reason:
-                    rec["notes"].append(
-                        {"author_id": ctx.author.id, "text": f"[{status}] {reason}", "at": now}
-                    )
-                if rec["archived"]:
-                    await self._edit_archived(guild, rec)
-                else:
-                    moved = await self._move_to_archive(guild, rec)
-                    if not moved:
-                        await self._resolve_in_place(guild, rec)
-                        warn = " (archive channel not set — resolved in the post channel)"
-
-        if not found:
-            await ctx.send(f"No suggestion **#{sid}** found.", ephemeral=True)
+        try:
+            sid = int(suggestion.lstrip("#"))
+        except (ValueError, AttributeError):
+            await interaction.response.send_message(
+                "Pick a suggestion from the list.", ephemeral=True
+            )
             return
-        await ctx.send(
-            f"✅ Suggestion **#{sid}** marked **{status}**.{warn}", ephemeral=True
-        )
-        await self._log(
-            guild,
-            f"📌 {ctx.author.mention} set suggestion **#{sid}** to **{status}**."
-            + (f" Reason: {reason}" if reason else ""),
-        )
-
-    @suggestmod.command(name="approve")
-    @app_commands.describe(suggestion_id="The suggestion number", reason="Optional note")
-    async def suggestmod_approve(
-        self, ctx: commands.Context, suggestion_id: int, *, reason: str = None
-    ) -> None:
-        """Approve a suggestion (moves it to the archive channel)."""
-        await self._change_status(ctx, suggestion_id, "approved", reason)
-
-    @suggestmod.command(name="deny")
-    @app_commands.describe(suggestion_id="The suggestion number", reason="Optional note")
-    async def suggestmod_deny(
-        self, ctx: commands.Context, suggestion_id: int, *, reason: str = None
-    ) -> None:
-        """Deny a suggestion (moves it to the archive channel)."""
-        await self._change_status(ctx, suggestion_id, "denied", reason)
-
-    @suggestmod.command(name="implement")
-    @app_commands.describe(suggestion_id="The suggestion number", reason="Optional note")
-    async def suggestmod_implement(
-        self, ctx: commands.Context, suggestion_id: int, *, reason: str = None
-    ) -> None:
-        """Mark a suggestion implemented (moves/updates it in the archive channel)."""
-        await self._change_status(ctx, suggestion_id, "implemented", reason)
-
-    @suggestmod.command(name="note")
-    @app_commands.describe(suggestion_id="The suggestion number", text="The note to attach")
-    async def suggestmod_note(
-        self, ctx: commands.Context, suggestion_id: int, *, text: str
-    ) -> None:
-        """Attach a public staff note to a suggestion."""
-        if not await self._require_staff(ctx):
+        suggestions = await self.config.guild(guild).suggestions()
+        if str(sid) not in suggestions:
+            await interaction.response.send_message(
+                f"No suggestion **#{sid}** found.", ephemeral=True
+            )
             return
-        guild = ctx.guild
-        now = datetime.now(timezone.utc).isoformat()
-        found = True
-        async with self.config.guild(guild).suggestions() as suggestions:
-            rec = suggestions.get(str(suggestion_id))
-            if not rec:
-                found = False
-            else:
-                rec["notes"].append({"author_id": ctx.author.id, "text": text, "at": now})
-                if rec["archived"]:
-                    await self._edit_archived(guild, rec)
-                else:
-                    await self._refresh_open_embed(guild, rec)
-        if not found:
-            await ctx.send(f"No suggestion **#{suggestion_id}** found.", ephemeral=True)
-            return
-        await ctx.send(
-            f"✅ Note added to suggestion **#{suggestion_id}**.", ephemeral=True
-        )
-        await self._log(
-            guild, f"🗒️ {ctx.author.mention} noted on **#{suggestion_id}**: {text}"
-        )
+        await interaction.response.send_modal(StaffActionModal(self, sid, status))
 
-    @suggestmod.command(name="list")
-    @app_commands.describe(status="Optional filter: open, approved, denied, implemented")
-    async def suggestmod_list(
-        self, ctx: commands.Context, status: str = None
+    @app_commands.command(name="suggestapprove", description="Approve a suggestion")
+    @app_commands.guild_only()
+    @app_commands.describe(suggestion="The suggestion to approve")
+    @app_commands.autocomplete(suggestion=suggestion_autocomplete)
+    async def suggestapprove(
+        self, interaction: discord.Interaction, suggestion: str
     ) -> None:
-        """List suggestions, optionally filtered by status."""
-        if not await self._require_staff(ctx):
+        await self._status_command_entry(interaction, suggestion, "approved")
+
+    @app_commands.command(name="suggestdeny", description="Deny a suggestion")
+    @app_commands.guild_only()
+    @app_commands.describe(suggestion="The suggestion to deny")
+    @app_commands.autocomplete(suggestion=suggestion_autocomplete)
+    async def suggestdeny(
+        self, interaction: discord.Interaction, suggestion: str
+    ) -> None:
+        await self._status_command_entry(interaction, suggestion, "denied")
+
+    @app_commands.command(
+        name="suggestimplement", description="Mark a suggestion implemented"
+    )
+    @app_commands.guild_only()
+    @app_commands.describe(suggestion="The suggestion to mark implemented")
+    @app_commands.autocomplete(suggestion=suggestion_autocomplete)
+    async def suggestimplement(
+        self, interaction: discord.Interaction, suggestion: str
+    ) -> None:
+        await self._status_command_entry(interaction, suggestion, "implemented")
+
+    @app_commands.command(name="suggestnote", description="Attach a staff note")
+    @app_commands.guild_only()
+    @app_commands.describe(suggestion="The suggestion to note")
+    @app_commands.autocomplete(suggestion=suggestion_autocomplete)
+    async def suggestnote(
+        self, interaction: discord.Interaction, suggestion: str
+    ) -> None:
+        guild = interaction.guild
+        if not await self.is_staff(interaction.user, guild):
+            await interaction.response.send_message(
+                "You don't have permission to manage suggestions.", ephemeral=True
+            )
             return
-        status = status.lower() if status else None
-        if status and status not in STATUS_META:
-            await ctx.send(
-                "Status must be one of: open, approved, denied, implemented.",
-                ephemeral=True,
+        try:
+            sid = int(suggestion.lstrip("#"))
+        except (ValueError, AttributeError):
+            await interaction.response.send_message(
+                "Pick a suggestion from the list.", ephemeral=True
+            )
+            return
+        suggestions = await self.config.guild(guild).suggestions()
+        if str(sid) not in suggestions:
+            await interaction.response.send_message(
+                f"No suggestion **#{sid}** found.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(StaffActionModal(self, sid, "note"))
+
+    @app_commands.command(name="suggestlist", description="List suggestions (staff)")
+    @app_commands.guild_only()
+    @app_commands.describe(status="Optional status filter")
+    @app_commands.choices(
+        status=[
+            app_commands.Choice(name="Open", value="open"),
+            app_commands.Choice(name="Approved", value="approved"),
+            app_commands.Choice(name="Denied", value="denied"),
+            app_commands.Choice(name="Implemented", value="implemented"),
+        ]
+    )
+    async def suggestlist(
+        self, interaction: discord.Interaction, status: Optional[str] = None
+    ) -> None:
+        guild = interaction.guild
+        if not await self.is_staff(interaction.user, guild):
+            await interaction.response.send_message(
+                "You don't have permission to manage suggestions.", ephemeral=True
             )
             return
 
-        suggestions = await self.config.guild(ctx.guild).suggestions()
+        suggestions = await self.config.guild(guild).suggestions()
         items = [
             rec
             for rec in suggestions.values()
@@ -604,23 +970,24 @@ class ShadySuggest(commands.Cog):
             lines = []
             for rec in items[:25]:
                 score = len(rec["upvotes"]) - len(rec["downvotes"])
-                _, label = STATUS_META.get(rec["status"], STATUS_META["open"])
+                _, label, _ = STATUS_META.get(rec["status"], STATUS_META["open"])
                 lines.append(
                     f"**#{rec['id']}** — {rec['title']} · {label} · Score {score:+d}"
                 )
             embed.description = "\n".join(lines)
             if len(items) > 25:
                 embed.set_footer(text=f"Showing 25 of {len(items)}")
-        await ctx.send(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="suggestreveal",
         description="Reveal the author and voters of a suggestion (staff only)",
     )
     @app_commands.guild_only()
-    @app_commands.describe(suggestion_id="The suggestion number")
+    @app_commands.describe(suggestion="The suggestion to reveal")
+    @app_commands.autocomplete(suggestion=suggestion_autocomplete)
     async def suggestreveal(
-        self, interaction: discord.Interaction, suggestion_id: int
+        self, interaction: discord.Interaction, suggestion: str
     ) -> None:
         guild = interaction.guild
         if not await self.is_staff(interaction.user, guild):
@@ -628,45 +995,78 @@ class ShadySuggest(commands.Cog):
                 "You don't have permission to reveal suggestions.", ephemeral=True
             )
             return
-
-        suggestions = await self.config.guild(guild).suggestions()
-        rec = suggestions.get(str(suggestion_id))
-        if not rec:
+        try:
+            sid = int(suggestion.lstrip("#"))
+        except (ValueError, AttributeError):
             await interaction.response.send_message(
-                f"No suggestion **#{suggestion_id}** found.", ephemeral=True
+                "Pick a suggestion from the list.", ephemeral=True
             )
             return
 
-        def fmt(ids):
-            if not ids:
-                return "*none*"
-            value = ", ".join(f"<@{i}>" for i in ids)
-            return value if len(value) <= 1024 else value[:1021] + "..."
+        suggestions = await self.config.guild(guild).suggestions()
+        rec = suggestions.get(str(sid))
+        if not rec:
+            await interaction.response.send_message(
+                f"No suggestion **#{sid}** found.", ephemeral=True
+            )
+            return
 
         author = f"<@{rec['author_id']}>"
         if rec.get("anonymous"):
             author += " *(posted anonymously)*"
 
-        embed = discord.Embed(
-            title=f"🔎 Reveal — Suggestion #{suggestion_id}",
-            description=rec["title"],
-            color=discord.Color.orange(),
-        )
-        embed.add_field(name="Author", value=author, inline=False)
-        embed.add_field(
-            name=f"✅ Upvotes ({len(rec['upvotes'])})",
-            value=fmt(rec["upvotes"]),
-            inline=False,
-        )
-        embed.add_field(
-            name=f"❌ Downvotes ({len(rec['downvotes'])})",
-            value=fmt(rec["downvotes"]),
-            inline=False,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        up = rec["upvotes"]
+        down = rec["downvotes"]
+        per_page = 25  # mentions per list per page (well under the 1024-char field cap)
+
+        def chunk(ids):
+            mentions = [f"<@{i}>" for i in ids]
+            pages = [mentions[i : i + per_page] for i in range(0, len(mentions), per_page)]
+            return pages or [[]]
+
+        up_pages = chunk(up)
+        down_pages = chunk(down)
+        num_pages = max(len(up_pages), len(down_pages))
+
+        def field_val(pages, i, total):
+            if i < len(pages) and pages[i]:
+                return ", ".join(pages[i])
+            return "*none*" if total == 0 else "—"
+
+        embeds = []
+        for i in range(num_pages):
+            embed = discord.Embed(
+                title=f"🔎 Reveal — Suggestion #{sid}",
+                description=rec["title"],
+                color=discord.Color.orange(),
+            )
+            embed.add_field(name="Author", value=author, inline=False)
+            embed.add_field(
+                name=f"👍 Upvotes ({len(up)})",
+                value=field_val(up_pages, i, len(up)),
+                inline=False,
+            )
+            embed.add_field(
+                name=f"👎 Downvotes ({len(down)})",
+                value=field_val(down_pages, i, len(down)),
+                inline=False,
+            )
+            if num_pages > 1:
+                embed.set_footer(text=f"Page {i + 1}/{num_pages}")
+            embeds.append(embed)
+
+        if num_pages == 1:
+            await interaction.response.send_message(embed=embeds[0], ephemeral=True)
+        else:
+            view = RevealPaginator(embeds)
+            await interaction.response.send_message(
+                embed=embeds[0], view=view, ephemeral=True
+            )
+            view.message = await interaction.original_response()
+
         await self._log(
             guild,
-            f"🔎 {interaction.user.mention} revealed the author/voters of **#{suggestion_id}**.",
+            f"🔎 {interaction.user.mention} revealed the author/voters of **#{sid}**.",
         )
 
     # -------------------- config commands --------------------
@@ -768,9 +1168,20 @@ class ShadySuggest(commands.Cog):
                     )
                     return
                 roles.remove(role.id)
-                await ctx.send(
-                    f"✅ {role.mention} can vote again.", ephemeral=True
-                )
+                await ctx.send(f"✅ {role.mention} can vote again.", ephemeral=True)
+
+    @suggestset.command(name="dmnotify")
+    @app_commands.describe(state="on or off")
+    async def suggestset_dmnotify(self, ctx: commands.Context, state: str) -> None:
+        """Toggle DM notifications to submitters."""
+        state = state.lower()
+        if state not in ("on", "off"):
+            await ctx.send("State must be `on` or `off`.", ephemeral=True)
+            return
+        await self.config.guild(ctx.guild).dm_notify.set(state == "on")
+        await ctx.send(
+            f"✅ Submitter DM notifications turned **{state}**.", ephemeral=True
+        )
 
     @suggestset.command(name="enable")
     async def suggestset_enable(self, ctx: commands.Context) -> None:
@@ -796,19 +1207,24 @@ class ShadySuggest(commands.Cog):
             r = ctx.guild.get_role(rid) if rid else None
             return r.mention if r else ("Not set" if not rid else f"`{rid}` (missing)")
 
-        blocklist = conf["vote_blocklist_roles"]
-        block_mentions = []
-        for rid in blocklist:
-            r = ctx.guild.get_role(rid)
-            if r:
-                block_mentions.append(r.mention)
+        def role_mentions(ids):
+            out = []
+            for rid in ids:
+                r = ctx.guild.get_role(rid)
+                if r:
+                    out.append(r.mention)
+            return ", ".join(out) if out else "None"
 
         embed = discord.Embed(
-            title="⚙️ ShadySuggest Settings",
-            color=discord.Color.blurple(),
+            title="⚙️ ShadySuggest Settings", color=discord.Color.blurple()
         )
         embed.add_field(
             name="Enabled", value="✅ Yes" if conf["enabled"] else "❌ No", inline=True
+        )
+        embed.add_field(
+            name="DM notify",
+            value="✅ On" if conf["dm_notify"] else "❌ Off",
+            inline=True,
         )
         embed.add_field(name="Submit channel", value=chan(conf["submit_channel"]), inline=True)
         embed.add_field(name="Post channel", value=chan(conf["post_channel"]), inline=True)
@@ -824,7 +1240,7 @@ class ShadySuggest(commands.Cog):
         )
         embed.add_field(
             name="Vote blocklist",
-            value=", ".join(block_mentions) if block_mentions else "None",
+            value=role_mentions(conf["vote_blocklist_roles"]),
             inline=False,
         )
         embed.set_footer(text=f"v{self.__version__}")
