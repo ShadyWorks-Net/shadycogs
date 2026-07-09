@@ -1,0 +1,12 @@
+{
+    "author": ["ShadyTidus"],
+    "name": "ShadySuggest",
+    "short": "Suggestion board with anonymous voting and staff triage",
+    "description": "A suggestion board where members submit ideas as clean embeds, the community votes with anonymous green/red buttons, and staff triage each suggestion (approve/deny/implemented). Features per-suggestion anonymous authoring, two hierarchy-minimum role gates (participants and staff), a vote-only role blocklist, separate submit/post/archive channels, public staff notes, and a role-locked reveal command that exposes the real author and voter lists to staff only.",
+    "install_msg": "ShadySuggest installed!\n\nSetup (admins):\n1. `[p]suggestset submitchannel #ideas`\n2. `[p]suggestset postchannel #suggestions`\n3. `[p]suggestset archivechannel #suggest-archive`\n4. `[p]suggestset participantrole @Member` and `[p]suggestset staffrole @Moderator`\n5. Optional: `[p]suggestset logchannel #suggest-log`, `[p]suggestset blocklist add @Muted`\n6. `[p]suggestset enable`\n\nMembers submit with `/suggest`. Staff use `/suggestmod` and `/suggestreveal`.",
+    "end_user_data_statement": "This cog stores suggestion text, the author's user ID (kept private when a suggestion is posted anonymously), and per-user vote records. Vote counts are shown publicly, but who voted and anonymous authorship are only visible to staff via the reveal command.",
+    "tags": ["suggestions", "feedback", "voting", "moderation", "board"],
+    "type": "COG",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0]
+}
