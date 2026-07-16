@@ -859,21 +859,6 @@ class ShadyPulse(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="uptime", description="Show bot uptime")
-    @commands.guild_only()
-    async def show_uptime(self, ctx: commands.Context):
-        """Show bot uptime (admin / manage-guild / owner)."""
-        if not await self.is_authorized(ctx):
-            await ctx.send("You don't have permission to view uptime.", ephemeral=True)
-            return
-
-        uptime = self._format_uptime(int((datetime.now(timezone.utc) - self.start_time).total_seconds()))
-        embed = discord.Embed(title="🕐 Bot Uptime", color=discord.Color.green())
-        embed.add_field(name="Uptime", value=f"**{uptime}**", inline=True)
-        embed.add_field(name="Started", value=f"<t:{int(self.start_time.timestamp())}:F>", inline=True)
-        embed.add_field(name="Latency", value=f"**{self.bot.latency * 1000:.0f}ms**", inline=True)
-        await ctx.send(embed=embed)
-
     @commands.hybrid_command(name="shadypulse", aliases=["sp"], description="Open the ShadyPulse control panel")
     @commands.is_owner()
     @commands.guild_only()

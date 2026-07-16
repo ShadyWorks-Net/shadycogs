@@ -21,8 +21,7 @@ Three commands total — everything else is in the panel.
 
 | Command | Who | Description |
 |---------|-----|-------------|
-| `[p]pulse` | Admin / Manage Guild / Owner | Health dashboard (⚠️ + error counts); also `/pulse` after slash sync |
-| `[p]uptime` | Admin / Manage Guild / Owner | Bot uptime; also `/uptime` after slash sync |
+| `[p]pulse` | Admin / Manage Guild / Owner | Health dashboard (latency, uptime, ⚠️ + error counts); also `/pulse` after slash sync |
 | `[p]shadypulse` (alias `[p]sp`) | Owner | Open the interactive control panel |
 
 ## Control Panel

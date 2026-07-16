@@ -18,7 +18,6 @@ Keep an eye on bot and service health!
 Check bot health:
 ```
 [p]pulse
-[p]uptime
 ```
 
 ## What's Monitored
