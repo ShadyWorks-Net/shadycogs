@@ -7,6 +7,7 @@ from discord import app_commands
 import asyncio
 import aiohttp
 import logging
+import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 from enum import Enum
@@ -22,6 +23,24 @@ class ServiceStatus(Enum):
     ONLINE = "online"
     OFFLINE = "offline"
     DEGRADED = "degraded"
+
+
+# Errors that represent user/usage problems, not a cog "erroring out". We don't
+# want these polluting the health signal, so they're never recorded as failures.
+IGNORED_PREFIX_ERRORS = (
+    commands.CommandNotFound,
+    commands.CheckFailure,
+    commands.UserInputError,
+    commands.DisabledCommand,
+    commands.CommandOnCooldown,
+    commands.MaxConcurrencyReached,
+    commands.NoPrivateMessage,
+    commands.PrivateMessageOnly,
+)
+IGNORED_APP_ERRORS = (
+    app_commands.CheckFailure,
+    app_commands.CommandOnCooldown,
+)
 
 
 STATUS_EMOJI = {ServiceStatus.ONLINE: "🟢", ServiceStatus.OFFLINE: "🔴", ServiceStatus.DEGRADED: "🟡"}
@@ -173,6 +192,8 @@ class ShadyPulse(commands.Cog):
             "cog_auto_reload": False,
             "cog_max_retries": 3,
             "cog_retry_cooldown_seconds": 60,
+            "alert_on_error": True,
+            "cog_error_window_seconds": 300,
         }
         self.config.register_global(**default_global)
 
@@ -181,16 +202,128 @@ class ShadyPulse(commands.Cog):
         self.session: Optional[aiohttp.ClientSession] = None
         self.start_time = datetime.now(timezone.utc)
 
+        # In-memory error tracking (resets on reload). Keyed by cog name.
+        # Each entry: {"count": int, "last_error": {command, type, message, traceback, timestamp}}
+        self.cog_errors: Dict[str, Dict] = {}
+        self._last_error_alert: Dict[str, datetime] = {}
+        self._orig_tree_error = None
+
+        # In-memory reload throttle. name -> {"attempts": int, "last": datetime}
+        self._reload_state: Dict[str, Dict] = {}
+        # When a cog was last reloaded, so errors from before the reload don't
+        # keep it Degraded (and don't re-trigger another reload immediately).
+        self._reloaded_at: Dict[str, datetime] = {}
+
     async def cog_load(self) -> None:
         self.session = aiohttp.ClientSession()
+        # Hook the app-command (slash) error path. discord.py calls tree.on_error
+        # for every app command failure; we wrap it so we can snapshot the error
+        # and still chain to Red's handler so the user is notified as normal.
+        self._orig_tree_error = self.bot.tree.on_error
+        self.bot.tree.on_error = self._on_app_command_error
         self.monitor_task = asyncio.create_task(self._monitor_loop())
         log.info("ShadyPulse loaded")
 
     async def cog_unload(self) -> None:
         if self.monitor_task:
             self.monitor_task.cancel()
+        if self._orig_tree_error is not None:
+            self.bot.tree.on_error = self._orig_tree_error
         if self.session:
             await self.session.close()
+
+    # ==================== COMMAND ERROR CAPTURE ====================
+
+    @commands.Cog.listener()
+    async def on_command_error(self, ctx: commands.Context, error: Exception) -> None:
+        """Capture real exceptions from prefix/hybrid commands in any cog.
+
+        This listener is additive: Red's own error handling still runs, so users
+        still get their error messages. We only record genuine failures.
+        """
+        if isinstance(error, IGNORED_PREFIX_ERRORS):
+            return
+        cog_name = ctx.cog.qualified_name if ctx.cog else None
+        command_name = ctx.command.qualified_name if ctx.command else "unknown"
+        await self._record_command_error(cog_name, command_name, error)
+
+    async def _on_app_command_error(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ) -> None:
+        """Wrapper around tree.on_error to capture slash-command failures."""
+        try:
+            if not isinstance(error, IGNORED_APP_ERRORS):
+                cog_name = None
+                command_name = "unknown"
+                cmd = interaction.command
+                if cmd is not None:
+                    command_name = cmd.qualified_name
+                    binding = getattr(cmd, "binding", None)
+                    if binding is not None:
+                        cog_name = getattr(binding, "qualified_name", type(binding).__name__)
+                await self._record_command_error(cog_name, command_name, error)
+        except Exception as e:  # never let our capture break the real handler
+            log.error(f"ShadyPulse error-capture failed: {e}")
+        # Chain to the original handler so Red still notifies the user.
+        if self._orig_tree_error is not None:
+            await self._orig_tree_error(interaction, error)
+
+    async def _record_command_error(
+        self, cog_name: Optional[str], command_name: str, error: Exception
+    ) -> None:
+        # Unwrap CommandInvokeError-style wrappers to get the real exception.
+        original = getattr(error, "original", error)
+        tb = "".join(traceback.format_exception(type(original), original, original.__traceback__))
+        now = datetime.now(timezone.utc)
+        entry = {
+            "command": command_name,
+            "type": type(original).__name__,
+            "message": (str(original)[:500] or "(no message)"),
+            "traceback": tb,
+            "timestamp": now.isoformat(),
+        }
+        key = cog_name or "(unknown)"
+        rec = self.cog_errors.setdefault(key, {"count": 0, "last_error": None})
+        rec["count"] += 1
+        rec["last_error"] = entry
+        log.warning(f"Captured command error in {key}.{command_name}: {type(original).__name__}: {original}")
+        await self._maybe_alert_error(key, entry)
+
+    async def _maybe_alert_error(self, cog_key: str, entry: Dict) -> None:
+        if not await self.config.alert_on_error():
+            return
+        now = datetime.now(timezone.utc)
+        cooldown = await self.config.cog_retry_cooldown_seconds()
+        last = self._last_error_alert.get(cog_key)
+        if last and (now - last).total_seconds() < cooldown:
+            return
+        self._last_error_alert[cog_key] = now
+
+        embed = discord.Embed(
+            title=f"⚠️ Command Error in {cog_key}",
+            color=discord.Color.orange(),
+            timestamp=now,
+        )
+        embed.add_field(name="Command", value=f"`{entry['command']}`", inline=True)
+        embed.add_field(name="Type", value=f"`{entry['type']}`", inline=True)
+        embed.add_field(name="Message", value=f"```{entry['message'][:400]}```", inline=False)
+        tb = entry["traceback"]
+        if len(tb) > 1000:
+            tb = "...\n" + tb[-1000:]
+        embed.add_field(name="Traceback", value=f"```py\n{tb}```", inline=False)
+        await self._send_alert(embed)
+
+    async def _send_alert(self, embed: discord.Embed) -> None:
+        channel_id = await self.config.alert_channel()
+        if not channel_id:
+            return
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            return
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException as e:
+            log.error(f"Failed to send alert: {e}")
 
     async def _monitor_loop(self) -> None:
         await self.bot.wait_until_ready()
@@ -207,6 +340,7 @@ class ShadyPulse(commands.Cog):
 
     async def _run_checks(self) -> None:
         results = {}
+        old = self.service_status
 
         # Bot health
         latency = self.bot.latency * 1000
@@ -218,16 +352,72 @@ class ShadyPulse(commands.Cog):
             if cfg.get("enabled", True):
                 results[f"http:{name}"] = await self._check_http(cfg)
 
-        # Cogs
+        # Cogs: loaded state + recent command errors form the health signal.
+        window = await self.config.cog_error_window_seconds()
+        now = datetime.now(timezone.utc)
         for name, cfg in (await self.config.monitored_cogs()).items():
-            if cfg.get("enabled", True):
-                loaded = self.bot.get_cog(name) is not None
-                results[f"cog:{name}"] = {"status": ServiceStatus.ONLINE.value if loaded else ServiceStatus.OFFLINE.value}
+            if not cfg.get("enabled", True):
+                continue
 
-                if not loaded:
-                    await self._handle_cog_failure(name, cfg)
+            loaded = self.bot.get_cog(name) is not None
+            rec = self.cog_errors.get(name)
+            error_count = 0
+            recent_error = False
+            if rec and rec["last_error"]:
+                error_count = rec["count"]
+                ts = datetime.fromisoformat(rec["last_error"]["timestamp"])
+                reloaded = self._reloaded_at.get(name)
+                # Only errors *since the last reload* count toward Degraded.
+                if reloaded is None or ts > reloaded:
+                    recent_error = (now - ts).total_seconds() < window
 
+            if not loaded:
+                cog_status = ServiceStatus.OFFLINE
+            elif recent_error:
+                # Loaded but a command threw recently -> not fully healthy.
+                cog_status = ServiceStatus.DEGRADED
+            else:
+                cog_status = ServiceStatus.ONLINE
+
+            results[f"cog:{name}"] = {
+                "status": cog_status.value,
+                "error_count": error_count,
+                "recent_error": recent_error,
+            }
+
+            if cog_status == ServiceStatus.ONLINE:
+                # Healthy again -> reset the reload throttle so future failures
+                # get a fresh set of attempts.
+                self._reload_state.pop(name, None)
+            else:
+                # Offline (unloaded) or Degraded (erroring) -> try to reload.
+                await self._handle_cog_failure(name, cfg, cog_status)
+
+        await self._check_transitions(old, results)
         self.service_status = results
+
+    async def _check_transitions(self, old: Dict, new: Dict) -> None:
+        """Alert the configured channel when a service changes up/down state."""
+        for key, data in new.items():
+            new_status = data.get("status")
+            old_status = old.get(key, {}).get("status") if old else None
+            if old_status is None or old_status == new_status:
+                continue
+            if new_status == ServiceStatus.OFFLINE.value:
+                await self._send_status_alert(key, old_status, new_status)
+            elif new_status == ServiceStatus.ONLINE.value and old_status in ("offline", "degraded"):
+                await self._send_status_alert(key, old_status, new_status)
+
+    async def _send_status_alert(self, key: str, old_status: str, new_status: str) -> None:
+        recovered = new_status == ServiceStatus.ONLINE.value
+        status_enum = ServiceStatus(new_status)
+        embed = discord.Embed(
+            title=f"{STATUS_EMOJI[status_enum]} {'Recovered' if recovered else 'Down'}: {key}",
+            description=f"`{old_status}` → `{new_status}`",
+            color=STATUS_COLOR[status_enum],
+            timestamp=datetime.now(timezone.utc),
+        )
+        await self._send_alert(embed)
 
     async def _check_http(self, cfg: Dict) -> Dict:
         try:
@@ -241,27 +431,55 @@ class ShadyPulse(commands.Cog):
         except Exception as e:
             return {"status": ServiceStatus.OFFLINE.value, "error": str(e)[:50]}
 
-    async def _handle_cog_failure(self, cog_name: str, cfg: Dict) -> None:
+    async def _handle_cog_failure(self, cog_name: str, cfg: Dict, status: ServiceStatus) -> None:
+        """Attempt an auto-reload for a cog that is Offline (unloaded) or
+        Degraded (loaded but throwing command errors).
+
+        Throttled by an in-memory cooldown + attempt cap. The cap resets once the
+        cog is healthy again (see _run_checks), so a flaky cog that recovers keeps
+        getting reloaded, while one that stays broken stops after max_retries.
+        """
         if not await self.config.cog_auto_reload():
             return
 
         ext = cfg.get("extension_name")
         if not ext:
-            return
+            return  # can't reload without an extension path
 
+        now = datetime.now(timezone.utc)
         max_retries = await self.config.cog_max_retries()
-        async with self.config.monitored_cogs() as cogs:
-            if cog_name not in cogs:
-                return
-            cogs[cog_name]["reload_attempts"] = cogs[cog_name].get("reload_attempts", 0) + 1
-            if cogs[cog_name]["reload_attempts"] > max_retries:
-                return
+        cooldown = await self.config.cog_retry_cooldown_seconds()
+
+        state = self._reload_state.setdefault(cog_name, {"attempts": 0, "last": None})
+        if state["last"] and (now - state["last"]).total_seconds() < cooldown:
+            return  # still within the reload cooldown
+        if state["attempts"] >= max_retries:
+            return  # gave up until the cog is healthy again
+
+        state["attempts"] += 1
+        state["last"] = now
+        attempt = state["attempts"]
+        reason = "unloaded" if status == ServiceStatus.OFFLINE else "command errors"
 
         try:
             await self.bot.reload_extension(ext)
-            log.info(f"Reloaded {cog_name}")
+            # Mark the reload time so pre-reload errors stop counting as recent.
+            self._reloaded_at[cog_name] = now
+            log.info(f"Reloaded {cog_name} ({reason}), attempt {attempt}/{max_retries}")
+            await self._send_alert(discord.Embed(
+                title=f"🔄 Reloaded {cog_name}",
+                description=f"Reason: **{reason}**\nAttempt {attempt}/{max_retries}",
+                color=discord.Color.blurple(),
+                timestamp=now,
+            ))
         except Exception as e:
             log.error(f"Failed to reload {cog_name}: {e}")
+            await self._send_alert(discord.Embed(
+                title=f"❌ Reload failed: {cog_name}",
+                description=f"Reason: **{reason}**\nAttempt {attempt}/{max_retries}\n```{str(e)[:300]}```",
+                color=discord.Color.red(),
+                timestamp=now,
+            ))
 
     def _format_uptime(self, seconds: int) -> str:
         d, h, m = seconds // 86400, (seconds % 86400) // 3600, (seconds % 3600) // 60
@@ -359,7 +577,10 @@ class ShadyPulse(commands.Cog):
         for name, data in results.items():
             if name.startswith("cog:"):
                 status = ServiceStatus(data.get("status", "unknown"))
-                cog_lines.append(f"{STATUS_EMOJI[status]} {name[4:]}")
+                line = f"{STATUS_EMOJI[status]} {name[4:]}"
+                if data.get("error_count"):
+                    line += f" ⚠️ {data['error_count']}"
+                cog_lines.append(line)
         if cog_lines:
             embed.add_field(name="🔌 Cogs", value="\n".join(cog_lines), inline=True)
 
@@ -418,6 +639,13 @@ class ShadyPulse(commands.Cog):
         auto = f"✅ ({config['cog_max_retries']} retries, {config['cog_retry_cooldown_seconds']}s cooldown)" if config["cog_auto_reload"] else "❌"
         embed.add_field(name="Auto-Reload", value=auto, inline=False)
 
+        err_alert = "✅" if config.get("alert_on_error", True) else "❌"
+        embed.add_field(
+            name="Error Alerts",
+            value=f"{err_alert} (window {config.get('cog_error_window_seconds', 300)}s)",
+            inline=False,
+        )
+
         await ctx.send(embed=embed)
 
     @shadypulse.command(name="alert")
@@ -469,6 +697,72 @@ class ShadyPulse(commands.Cog):
                 return
             del cogs[name]
         await ctx.send(f"✅ Stopped monitoring `{name}`")
+
+    @shadypulse.command(name="alerterrors")
+    @app_commands.describe(enabled="Alert the channel when a command throws an exception")
+    async def pulse_alerterrors(self, ctx: commands.Context, enabled: bool):
+        """Toggle immediate alerts on captured command errors."""
+        await self.config.alert_on_error.set(enabled)
+        await ctx.send(f"Command-error alerts: {'Enabled' if enabled else 'Disabled'}")
+
+    @shadypulse.command(name="errors")
+    @app_commands.describe(name="Cog name to show the last traceback for (omit for a summary)")
+    async def pulse_errors(self, ctx: commands.Context, name: str = None):
+        """Show captured command errors and tracebacks."""
+        if not self.cog_errors:
+            await ctx.send("No command errors captured since last reload. ✅")
+            return
+
+        if name:
+            rec = self.cog_errors.get(name)
+            if not rec or not rec["last_error"]:
+                await ctx.send(f"No errors captured for `{name}`.")
+                return
+            e = rec["last_error"]
+            embed = discord.Embed(
+                title=f"⚠️ Last error in {name}",
+                color=discord.Color.orange(),
+                timestamp=datetime.fromisoformat(e["timestamp"]),
+            )
+            embed.add_field(name="Command", value=f"`{e['command']}`", inline=True)
+            embed.add_field(name="Type", value=f"`{e['type']}`", inline=True)
+            embed.add_field(name="Total Errors", value=str(rec["count"]), inline=True)
+            embed.add_field(name="Message", value=f"```{e['message'][:400]}```", inline=False)
+            tb = e["traceback"]
+            if len(tb) > 1400:
+                tb = "...\n" + tb[-1400:]
+            embed.add_field(name="Traceback", value=f"```py\n{tb}```", inline=False)
+            await ctx.send(embed=embed)
+            return
+
+        lines = []
+        for k, rec in self.cog_errors.items():
+            le = rec["last_error"]
+            if le:
+                lines.append(f"• `{k}` — {rec['count']} error(s), last: `{le['type']}` in `{le['command']}`")
+        embed = discord.Embed(
+            title="⚠️ Captured Command Errors",
+            description="\n".join(lines) or "None",
+            color=discord.Color.orange(),
+        )
+        embed.set_footer(text="Use [p]shadypulse errors <CogName> for the full traceback")
+        await ctx.send(embed=embed)
+
+    @shadypulse.command(name="clearerrors")
+    @app_commands.describe(name="Cog name to clear (omit to clear all)")
+    async def pulse_clearerrors(self, ctx: commands.Context, name: str = None):
+        """Clear captured error history."""
+        if name:
+            if name in self.cog_errors:
+                del self.cog_errors[name]
+                self._last_error_alert.pop(name, None)
+                await ctx.send(f"✅ Cleared errors for `{name}`.")
+            else:
+                await ctx.send(f"No errors recorded for `{name}`.")
+            return
+        self.cog_errors.clear()
+        self._last_error_alert.clear()
+        await ctx.send("✅ Cleared all captured errors.")
 
     @shadypulse.command(name="list")
     async def pulse_list(self, ctx: commands.Context):

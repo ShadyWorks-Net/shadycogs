@@ -11,7 +11,7 @@ Keep an eye on bot and service health!
 - **Health Dashboard** - Quick overview of all systems
 - **Uptime Tracking** - See how long the bot has been running
 - **HTTP Monitoring** - Watch external API endpoints
-- **Cog Monitoring** - Detect and auto-fix cog failures
+- **Cog Monitoring** - Detect crashes *and* command errors (with traceback snapshots), auto-reload, and alerts
 
 ## For Staff
 
