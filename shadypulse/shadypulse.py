@@ -760,12 +760,19 @@ class ShadyPulse(commands.Cog):
         reason = "unloaded" if status == ServiceStatus.OFFLINE else "command errors"
 
         try:
-            await self.bot.reload_extension(ext)
-            # Mark the reload time so pre-reload errors stop counting as recent.
+            # reload_extension requires the extension to be currently loaded. If
+            # it was fully unloaded (Offline), load it fresh instead.
+            if ext in self.bot.extensions:
+                await self.bot.reload_extension(ext)
+                verb = "Reloaded"
+            else:
+                await self.bot.load_extension(ext)
+                verb = "Loaded"
+            # Mark the (re)load time so pre-reload errors stop counting as recent.
             self._reloaded_at[cog_name] = now
-            log.info(f"Reloaded {cog_name} ({reason}), attempt {attempt}/{max_retries}")
+            log.info(f"{verb} {cog_name} ({reason}), attempt {attempt}/{max_retries}")
             await self._send_alert(discord.Embed(
-                title=f"🔄 Reloaded {cog_name}",
+                title=f"🔄 {verb} {cog_name}",
                 description=f"Reason: **{reason}**\nAttempt {attempt}/{max_retries}",
                 color=discord.Color.blurple(),
                 timestamp=now,
