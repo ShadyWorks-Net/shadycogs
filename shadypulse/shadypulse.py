@@ -689,7 +689,12 @@ class ShadyPulse(commands.Cog):
                 self._reload_state.pop(name, None)
             else:
                 # Offline (unloaded) or Degraded (erroring) -> try to reload.
-                await self._handle_cog_failure(name, cfg, cog_status)
+                recovered = await self._handle_cog_failure(name, cfg, cog_status)
+                if recovered and self.bot.get_cog(name) is not None:
+                    # The (re)load fixed it this same cycle -> show it healthy
+                    # now, so there's no red flicker and no transient Down alert.
+                    results[f"cog:{name}"]["status"] = ServiceStatus.ONLINE.value
+                    self._reload_state.pop(name, None)
 
         await self._check_transitions(old, results)
         self.service_status = results
@@ -729,20 +734,23 @@ class ShadyPulse(commands.Cog):
         except Exception as e:
             return {"status": ServiceStatus.OFFLINE.value, "error": str(e)[:50]}
 
-    async def _handle_cog_failure(self, cog_name: str, cfg: Dict, status: ServiceStatus) -> None:
+    async def _handle_cog_failure(self, cog_name: str, cfg: Dict, status: ServiceStatus) -> bool:
         """Attempt an auto-reload for a cog that is Offline (unloaded) or
         Degraded (loaded but throwing command errors).
 
         Throttled by an in-memory cooldown + attempt cap. The cap resets once the
         cog is healthy again (see _run_checks), so a flaky cog that recovers keeps
         getting reloaded, while one that stays broken stops after max_retries.
+
+        Returns True only if it successfully (re)loaded the cog this call, so the
+        caller can reflect recovery in the same check cycle.
         """
         if not await self.config.cog_auto_reload():
-            return
+            return False
 
         ext = cfg.get("extension_name")
         if not ext:
-            return  # can't reload without an extension path
+            return False  # can't reload without an extension path
 
         now = datetime.now(timezone.utc)
         max_retries = await self.config.cog_max_retries()
@@ -750,9 +758,9 @@ class ShadyPulse(commands.Cog):
 
         state = self._reload_state.setdefault(cog_name, {"attempts": 0, "last": None})
         if state["last"] and (now - state["last"]).total_seconds() < cooldown:
-            return  # still within the reload cooldown
+            return False  # still within the reload cooldown
         if state["attempts"] >= max_retries:
-            return  # gave up until the cog is healthy again
+            return False  # gave up until the cog is healthy again
 
         state["attempts"] += 1
         state["last"] = now
@@ -770,6 +778,7 @@ class ShadyPulse(commands.Cog):
                 color=discord.Color.blurple(),
                 timestamp=now,
             ))
+            return True
         except Exception as e:
             log.error(f"Failed to reload {cog_name}: {e}")
             await self._send_alert(discord.Embed(
@@ -778,6 +787,7 @@ class ShadyPulse(commands.Cog):
                 color=discord.Color.red(),
                 timestamp=now,
             ))
+            return False
 
     async def _reload_or_load(self, ext: str) -> str:
         """(Re)load a cog package the way Red's [p]load / [p]reload do.
