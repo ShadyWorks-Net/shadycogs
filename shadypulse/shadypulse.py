@@ -1,6 +1,8 @@
 """
 ShadyPulse - Health monitoring cog.
-Monitors bot status, HTTP services, and cog health.
+Monitors bot status, HTTP services, and cog health (loaded + responding).
+
+Everything is driven from a single interactive panel: `[p]shadypulse`.
 """
 import discord
 from discord import app_commands
@@ -8,13 +10,12 @@ import asyncio
 import aiohttp
 import logging
 import traceback
-from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, Any
+from datetime import datetime, timezone
+from typing import Optional, Dict, List
 from enum import Enum
 
 from redbot.core import commands, Config
 from redbot.core.bot import Red
-from typing import List
 
 log = logging.getLogger("red.shadycogs.shadypulse")
 
@@ -51,15 +52,44 @@ STATUS_COLOR = {
 }
 
 
-# ==================== UI COMPONENTS ====================
+def build_panel_embed(config: dict) -> discord.Embed:
+    """The status summary shown at the top of the control panel."""
+    enabled = config["enabled"]
+    e = discord.Embed(
+        title="⚙️ ShadyPulse Control Panel",
+        color=discord.Color.green() if enabled else discord.Color.red(),
+    )
+    e.add_field(name="Monitoring", value="✅ Enabled" if enabled else "❌ Disabled", inline=True)
+    e.add_field(name="Interval", value=f"{config['check_interval_seconds']}s", inline=True)
+    e.add_field(
+        name="Alert Channel",
+        value=f"<#{config['alert_channel']}>" if config["alert_channel"] else "Not set",
+        inline=True,
+    )
+    e.add_field(name="Monitored Cogs", value=str(len(config["monitored_cogs"])), inline=True)
+    e.add_field(name="HTTP Services", value=str(len(config["http_services"])), inline=True)
+    auto = (
+        f"✅ {config['cog_max_retries']}x / {config['cog_retry_cooldown_seconds']}s"
+        if config["cog_auto_reload"] else "❌"
+    )
+    e.add_field(name="Auto-Reload", value=auto, inline=True)
+    e.add_field(
+        name="Error Alerts",
+        value="✅ On" if config.get("alert_on_error", True) else "❌ Off",
+        inline=True,
+    )
+    e.set_footer(text="Use the buttons below to configure — no commands needed.")
+    return e
 
 
-class SettingsModal(discord.ui.Modal, title="Pulse Settings"):
-    """Modal for main settings."""
+# ==================== UI: MODALS ====================
 
-    interval = discord.ui.TextInput(label="Check Interval (seconds)", placeholder="60", max_length=4)
-    max_retries = discord.ui.TextInput(label="Cog Reload Max Retries", placeholder="3", max_length=2)
-    cooldown = discord.ui.TextInput(label="Cog Reload Cooldown (seconds)", placeholder="60", max_length=4)
+
+class SettingsModal(discord.ui.Modal, title="ShadyPulse Settings"):
+    interval = discord.ui.TextInput(label="Check Interval (sec, 30-600)", max_length=4)
+    max_retries = discord.ui.TextInput(label="Reload Max Retries (1-10)", max_length=2)
+    cooldown = discord.ui.TextInput(label="Reload Cooldown (sec, 30-600)", max_length=4)
+    error_window = discord.ui.TextInput(label="Error Window (sec, 30-3600)", max_length=4)
 
     def __init__(self, cog: "ShadyPulse", config: dict):
         super().__init__()
@@ -67,29 +97,30 @@ class SettingsModal(discord.ui.Modal, title="Pulse Settings"):
         self.interval.default = str(config.get("check_interval_seconds", 60))
         self.max_retries.default = str(config.get("cog_max_retries", 3))
         self.cooldown.default = str(config.get("cog_retry_cooldown_seconds", 60))
+        self.error_window.default = str(config.get("cog_error_window_seconds", 300))
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
             interval = max(30, min(600, int(self.interval.value)))
             retries = max(1, min(10, int(self.max_retries.value)))
             cooldown = max(30, min(600, int(self.cooldown.value)))
+            window = max(30, min(3600, int(self.error_window.value)))
         except ValueError:
-            await interaction.response.send_message("Invalid values.", ephemeral=True)
+            await interaction.response.send_message("❌ All values must be numbers.", ephemeral=True)
             return
 
         await self.cog.config.check_interval_seconds.set(interval)
         await self.cog.config.cog_max_retries.set(retries)
         await self.cog.config.cog_retry_cooldown_seconds.set(cooldown)
-
+        await self.cog.config.cog_error_window_seconds.set(window)
         await interaction.response.send_message(
-            f"Settings updated!\n**Interval:** {interval}s\n**Retries:** {retries}\n**Cooldown:** {cooldown}s",
-            ephemeral=True
+            f"✅ Settings saved.\n**Interval:** {interval}s • **Retries:** {retries} • "
+            f"**Cooldown:** {cooldown}s • **Error window:** {window}s",
+            ephemeral=True,
         )
 
 
 class AddHttpModal(discord.ui.Modal, title="Add HTTP Service"):
-    """Modal for adding HTTP service."""
-
     name = discord.ui.TextInput(label="Service Name", placeholder="my-api", max_length=32)
     url = discord.ui.TextInput(label="URL", placeholder="https://api.example.com/health")
     expected = discord.ui.TextInput(label="Expected Status Code", placeholder="200", max_length=3)
@@ -104,7 +135,7 @@ class AddHttpModal(discord.ui.Modal, title="Add HTTP Service"):
             status_code = int(self.expected.value)
             timeout = int(self.timeout.value)
         except ValueError:
-            await interaction.response.send_message("Invalid numbers.", ephemeral=True)
+            await interaction.response.send_message("❌ Status code and timeout must be numbers.", ephemeral=True)
             return
 
         async with self.cog.config.http_services() as services:
@@ -114,70 +145,323 @@ class AddHttpModal(discord.ui.Modal, title="Add HTTP Service"):
                 "timeout": timeout,
                 "enabled": True,
             }
+        await interaction.response.send_message(f"✅ Added HTTP service `{self.name.value}`.", ephemeral=True)
 
-        await interaction.response.send_message(f"✅ Added HTTP service `{self.name.value}`")
+
+# ==================== UI: VIEWS ====================
 
 
-class AddCogModal(discord.ui.Modal, title="Add Cog Monitor"):
-    """Modal for adding cog monitor."""
+class _OwnerView(discord.ui.View):
+    """Base view that restricts every component to the bot owner."""
 
-    cog_name = discord.ui.TextInput(label="Cog Class Name", placeholder="LevelUp")
-    extension = discord.ui.TextInput(label="Extension Path (for auto-reload)", placeholder="mycogs.levelup", required=False)
+    def __init__(self, cog: "ShadyPulse", timeout: float = 300):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await self.cog.bot.is_owner(interaction.user):
+            return True
+        await interaction.response.send_message("This panel is owner-only.", ephemeral=True)
+        return False
+
+
+class CogManageView(_OwnerView):
+    """Add cogs to monitor from a dropdown of the bot's loaded cogs, and remove
+    monitored ones. Extension paths are resolved automatically."""
 
     def __init__(self, cog: "ShadyPulse"):
-        super().__init__()
-        self.cog = cog
+        super().__init__(cog)
+        self.page = 0
+        self.addable: List[str] = []
+        self.monitored: Dict[str, dict] = {}
 
-    async def on_submit(self, interaction: discord.Interaction):
-        async with self.cog.config.monitored_cogs() as cogs:
-            cogs[self.cog_name.value] = {
-                "enabled": True,
-                "extension_name": self.extension.value or None,
-                "consecutive_failures": 0,
-                "reload_attempts": 0,
-            }
+    async def refresh(self):
+        self.monitored = await self.cog.config.monitored_cogs()
+        loaded = [n for n in sorted(self.cog.bot.cogs.keys()) if n != "ShadyPulse"]
+        self.addable = [n for n in loaded if n not in self.monitored]
+        pages = max(1, (len(self.addable) + 24) // 25)
+        self.page = max(0, min(self.page, pages - 1))
+        self._build()
 
-        ext_msg = f" (extension: `{self.extension.value}`)" if self.extension.value else " (no auto-reload)"
-        await interaction.response.send_message(f"✅ Monitoring `{self.cog_name.value}`{ext_msg}")
+    def _build(self):
+        self.clear_items()
+
+        page_opts = self.addable[self.page * 25:(self.page + 1) * 25]
+        if page_opts:
+            add_sel = discord.ui.Select(
+                placeholder=f"➕ Add loaded cogs to monitor (page {self.page + 1})",
+                min_values=0,
+                max_values=len(page_opts),
+                options=[discord.SelectOption(label=n[:100], value=n) for n in page_opts],
+            )
+            add_sel.callback = self._on_add
+            self.add_item(add_sel)
+
+        if self.monitored:
+            mon = list(self.monitored.keys())[:25]
+            rem_sel = discord.ui.Select(
+                placeholder="➖ Remove cogs from monitoring",
+                min_values=0,
+                max_values=len(mon),
+                options=[discord.SelectOption(label=n[:100], value=n) for n in mon],
+            )
+            rem_sel.callback = self._on_remove
+            self.add_item(rem_sel)
+
+        if len(self.addable) > 25:
+            prev = discord.ui.Button(label="◀", style=discord.ButtonStyle.secondary, disabled=self.page == 0)
+            prev.callback = self._prev
+            self.add_item(prev)
+            nxt = discord.ui.Button(
+                label="▶", style=discord.ButtonStyle.secondary,
+                disabled=(self.page + 1) * 25 >= len(self.addable),
+            )
+            nxt.callback = self._next
+            self.add_item(nxt)
+
+    def embed(self) -> discord.Embed:
+        e = discord.Embed(title="🔌 Manage Monitored Cogs", color=discord.Color.blurple())
+        if self.monitored:
+            lines = []
+            for n, c in self.monitored.items():
+                ext = c.get("extension_name")
+                lines.append(f"• `{n}` — {'🔄 auto-reload' if ext else '⚠️ no extension (no reload)'}")
+            e.add_field(name="Currently monitored", value="\n".join(lines)[:1024], inline=False)
+        else:
+            e.add_field(name="Currently monitored", value="None yet", inline=False)
+        e.set_footer(text=f"{len(self.addable)} loaded cog(s) available to add")
+        return e
+
+    async def _on_add(self, interaction: discord.Interaction):
+        selected = interaction.data.get("values", [])
+        for name in selected:
+            ext = self.cog._extension_for_cog(name)
+            async with self.cog.config.monitored_cogs() as cogs:
+                cogs[name] = {"enabled": True, "extension_name": ext, "reload_attempts": 0}
+        await self.refresh()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    async def _on_remove(self, interaction: discord.Interaction):
+        for name in interaction.data.get("values", []):
+            async with self.cog.config.monitored_cogs() as cogs:
+                cogs.pop(name, None)
+            self.cog.cog_errors.pop(name, None)
+        await self.refresh()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    async def _prev(self, interaction: discord.Interaction):
+        self.page -= 1
+        self._build()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    async def _next(self, interaction: discord.Interaction):
+        self.page += 1
+        self._build()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
 
 
-class SetupView(discord.ui.View):
-    """Setup view for ShadyPulse."""
+class HttpManageView(_OwnerView):
+    def __init__(self, cog: "ShadyPulse"):
+        super().__init__(cog)
+        self.services: Dict[str, dict] = {}
 
-    def __init__(self, cog: "ShadyPulse", config: dict):
-        super().__init__(timeout=300)
-        self.cog = cog
-        self.config = config
+    async def refresh(self):
+        self.services = await self.cog.config.http_services()
+        self._build()
 
-    @discord.ui.button(label="Settings", style=discord.ButtonStyle.primary, emoji="⚙️")
+    def _build(self):
+        self.clear_items()
+        add_btn = discord.ui.Button(label="Add HTTP Service", style=discord.ButtonStyle.success, emoji="➕")
+        add_btn.callback = self._add
+        self.add_item(add_btn)
+        if self.services:
+            names = list(self.services.keys())[:25]
+            sel = discord.ui.Select(
+                placeholder="➖ Remove HTTP service",
+                min_values=0,
+                max_values=len(names),
+                options=[discord.SelectOption(label=n[:100], value=n) for n in names],
+            )
+            sel.callback = self._remove
+            self.add_item(sel)
+
+    def embed(self) -> discord.Embed:
+        e = discord.Embed(title="🌐 Manage HTTP Services", color=discord.Color.blurple())
+        if self.services:
+            value = "\n".join(f"• `{n}`: {c['url']}" for n, c in self.services.items())
+            e.add_field(name="Services", value=value[:1024], inline=False)
+        else:
+            e.add_field(name="Services", value="None", inline=False)
+        return e
+
+    async def _add(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AddHttpModal(self.cog))
+
+    async def _remove(self, interaction: discord.Interaction):
+        for name in interaction.data.get("values", []):
+            async with self.cog.config.http_services() as s:
+                s.pop(name, None)
+        await self.refresh()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+
+class AlertsView(_OwnerView):
+    def __init__(self, cog: "ShadyPulse"):
+        super().__init__(cog)
+        chan = discord.ui.ChannelSelect(
+            placeholder="Set alert channel (deselect to disable)",
+            channel_types=[discord.ChannelType.text],
+            min_values=0,
+            max_values=1,
+        )
+        chan.callback = self._on_channel
+        self.add_item(chan)
+
+    async def embed(self) -> discord.Embed:
+        c = await self.cog.config.all()
+        e = discord.Embed(title="🔔 Alerts", color=discord.Color.blurple())
+        e.add_field(
+            name="Alert Channel",
+            value=f"<#{c['alert_channel']}>" if c["alert_channel"] else "Not set",
+            inline=True,
+        )
+        e.add_field(
+            name="Error Alerts",
+            value="✅ On" if c.get("alert_on_error", True) else "❌ Off",
+            inline=True,
+        )
+        e.set_footer(text="Status changes and command errors post here.")
+        return e
+
+    async def _on_channel(self, interaction: discord.Interaction):
+        vals = interaction.data.get("values", [])
+        await self.cog.config.alert_channel.set(int(vals[0]) if vals else None)
+        await interaction.response.edit_message(embed=await self.embed(), view=self)
+
+    @discord.ui.button(label="Toggle Error Alerts", style=discord.ButtonStyle.primary, emoji="⚠️")
+    async def toggle_err(self, interaction: discord.Interaction, button: discord.ui.Button):
+        new = not await self.cog.config.alert_on_error()
+        await self.cog.config.alert_on_error.set(new)
+        await interaction.response.edit_message(embed=await self.embed(), view=self)
+
+
+class ErrorsView(_OwnerView):
+    def __init__(self, cog: "ShadyPulse"):
+        super().__init__(cog)
+        self._build()
+
+    def _build(self):
+        self.clear_items()
+        keys = list(self.cog.cog_errors.keys())[:25]
+        if keys:
+            sel = discord.ui.Select(
+                placeholder="View traceback for…",
+                min_values=0,
+                max_values=1,
+                options=[discord.SelectOption(label=k[:100], value=k) for k in keys],
+            )
+            sel.callback = self._view
+            self.add_item(sel)
+            clr = discord.ui.Button(label="Clear All", style=discord.ButtonStyle.danger, emoji="🗑️")
+            clr.callback = self._clear
+            self.add_item(clr)
+
+    def embed(self) -> discord.Embed:
+        e = discord.Embed(title="⚠️ Captured Command Errors", color=discord.Color.orange())
+        if not self.cog.cog_errors:
+            e.description = "No command errors captured since last reload. ✅"
+            return e
+        lines = []
+        for k, rec in self.cog.cog_errors.items():
+            le = rec.get("last_error")
+            if le:
+                lines.append(f"• `{k}` — {rec['count']} error(s), last `{le['type']}` in `{le['command']}`")
+        e.description = "\n".join(lines)[:4000]
+        return e
+
+    async def _view(self, interaction: discord.Interaction):
+        vals = interaction.data.get("values", [])
+        if not vals:
+            await interaction.response.defer()
+            return
+        name = vals[0]
+        rec = self.cog.cog_errors.get(name)
+        if not rec or not rec.get("last_error"):
+            await interaction.response.send_message(f"No errors for `{name}`.", ephemeral=True)
+            return
+        e = rec["last_error"]
+        emb = discord.Embed(
+            title=f"⚠️ {name} — last error",
+            color=discord.Color.orange(),
+            timestamp=datetime.fromisoformat(e["timestamp"]),
+        )
+        emb.add_field(name="Command", value=f"`{e['command']}`", inline=True)
+        emb.add_field(name="Type", value=f"`{e['type']}`", inline=True)
+        emb.add_field(name="Count", value=str(rec["count"]), inline=True)
+        emb.add_field(name="Message", value=f"```{e['message'][:400]}```", inline=False)
+        tb = e["traceback"]
+        if len(tb) > 1400:
+            tb = "...\n" + tb[-1400:]
+        emb.add_field(name="Traceback", value=f"```py\n{tb}```", inline=False)
+        await interaction.response.send_message(embed=emb, ephemeral=True)
+
+    async def _clear(self, interaction: discord.Interaction):
+        self.cog.cog_errors.clear()
+        self.cog._last_error_alert.clear()
+        self._build()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+
+class PanelView(_OwnerView):
+    """The single control panel — every setting lives behind these buttons."""
+
+    @discord.ui.button(label="Settings", style=discord.ButtonStyle.primary, emoji="⚙️", row=0)
     async def settings_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         config = await self.cog.config.all()
         await interaction.response.send_modal(SettingsModal(self.cog, config))
 
-    @discord.ui.button(label="Add HTTP", style=discord.ButtonStyle.secondary, emoji="🌐")
-    async def add_http_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AddHttpModal(self.cog))
+    @discord.ui.button(label="Cogs", style=discord.ButtonStyle.secondary, emoji="🔌", row=0)
+    async def cogs_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = CogManageView(self.cog)
+        await view.refresh()
+        await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
 
-    @discord.ui.button(label="Add Cog", style=discord.ButtonStyle.secondary, emoji="🔌")
-    async def add_cog_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AddCogModal(self.cog))
+    @discord.ui.button(label="HTTP", style=discord.ButtonStyle.secondary, emoji="🌐", row=0)
+    async def http_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = HttpManageView(self.cog)
+        await view.refresh()
+        await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
 
-    @discord.ui.button(label="Enable", style=discord.ButtonStyle.success, emoji="✅")
-    async def enable_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.config.enabled.set(True)
-        await interaction.response.send_message("Monitoring **enabled**.", ephemeral=True)
+    @discord.ui.button(label="Alerts", style=discord.ButtonStyle.secondary, emoji="🔔", row=0)
+    async def alerts_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = AlertsView(self.cog)
+        await interaction.response.send_message(embed=await view.embed(), view=view, ephemeral=True)
 
-    @discord.ui.button(label="Disable", style=discord.ButtonStyle.danger, emoji="❌")
-    async def disable_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.config.enabled.set(False)
-        await interaction.response.send_message("Monitoring **disabled**.", ephemeral=True)
+    @discord.ui.button(label="Errors", style=discord.ButtonStyle.secondary, emoji="⚠️", row=0)
+    async def errors_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = ErrorsView(self.cog)
+        await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
+
+    @discord.ui.button(label="Toggle Monitoring", style=discord.ButtonStyle.success, emoji="▶️", row=1)
+    async def toggle_monitoring(self, interaction: discord.Interaction, button: discord.ui.Button):
+        new = not await self.cog.config.enabled()
+        await self.cog.config.enabled.set(new)
+        config = await self.cog.config.all()
+        await interaction.response.edit_message(embed=build_panel_embed(config), view=self)
+
+    @discord.ui.button(label="Toggle Auto-Reload", style=discord.ButtonStyle.success, emoji="🔄", row=1)
+    async def toggle_autoreload(self, interaction: discord.Interaction, button: discord.ui.Button):
+        new = not await self.cog.config.cog_auto_reload()
+        await self.cog.config.cog_auto_reload.set(new)
+        config = await self.cog.config.all()
+        await interaction.response.edit_message(embed=build_panel_embed(config), view=self)
 
 
 # ==================== MAIN COG ====================
 
 
 class ShadyPulse(commands.Cog):
-    """Health monitoring for bot and services."""
+    """Health monitoring for bot, services, and cogs."""
 
     def __init__(self, bot: Red) -> None:
         self.bot = bot
@@ -231,6 +515,18 @@ class ShadyPulse(commands.Cog):
             self.bot.tree.on_error = self._orig_tree_error
         if self.session:
             await self.session.close()
+
+    def _extension_for_cog(self, cog_name: str) -> Optional[str]:
+        """Resolve the extension (load name) a cog was loaded from, so we can
+        reload it. Matches the cog's module against the bot's loaded extensions."""
+        cog = self.bot.get_cog(cog_name)
+        if cog is None:
+            return None
+        mod = type(cog).__module__ or ""
+        for ext_name in self.bot.extensions:
+            if mod == ext_name or mod.startswith(ext_name + "."):
+                return ext_name
+        return mod.split(".")[0] if mod else None
 
     # ==================== COMMAND ERROR CAPTURE ====================
 
@@ -324,6 +620,8 @@ class ShadyPulse(commands.Cog):
             await channel.send(embed=embed)
         except discord.HTTPException as e:
             log.error(f"Failed to send alert: {e}")
+
+    # ==================== MONITOR LOOP ====================
 
     async def _monitor_loop(self) -> None:
         await self.bot.wait_until_ready()
@@ -424,7 +722,7 @@ class ShadyPulse(commands.Cog):
             async with self.session.get(
                 cfg["url"],
                 timeout=aiohttp.ClientTimeout(total=cfg.get("timeout", 10)),
-                ssl=False
+                ssl=False,
             ) as resp:
                 status = ServiceStatus.ONLINE if resp.status == cfg.get("expected_status", 200) else ServiceStatus.DEGRADED
                 return {"status": status.value, "code": resp.status}
@@ -484,64 +782,39 @@ class ShadyPulse(commands.Cog):
     def _format_uptime(self, seconds: int) -> str:
         d, h, m = seconds // 86400, (seconds % 86400) // 3600, (seconds % 3600) // 60
         parts = []
-        if d: parts.append(f"{d}d")
-        if h: parts.append(f"{h}h")
-        if m: parts.append(f"{m}m")
+        if d:
+            parts.append(f"{d}d")
+        if h:
+            parts.append(f"{h}h")
+        if m:
+            parts.append(f"{m}m")
         return " ".join(parts) or "< 1m"
 
-    async def is_authorized(self, interaction: discord.Interaction) -> bool:
-        """Check if user has permission to view health status."""
-        # Bot owner always authorized
-        if await self.bot.is_owner(interaction.user):
+    async def is_authorized(self, ctx: commands.Context) -> bool:
+        """Check if the invoker may view health status (owner / admin / manage-guild)."""
+        if await self.bot.is_owner(ctx.author):
             return True
-
-        if not isinstance(interaction.user, discord.Member):
+        if not isinstance(ctx.author, discord.Member):
             return False
-
-        # Admin/guild owner always authorized
-        if interaction.user.guild_permissions.administrator or interaction.user == interaction.guild.owner:
+        if ctx.author.guild_permissions.administrator or ctx.author == ctx.guild.owner:
             return True
-
-        # Check manage_guild permission
-        if interaction.user.guild_permissions.manage_guild:
+        if ctx.author.guild_permissions.manage_guild:
             return True
-
         return False
 
-    async def bot_channel_autocomplete(
-        self, interaction: discord.Interaction, current: str
-    ) -> List[app_commands.Choice[str]]:
-        """Autocomplete for channels the bot can see and send messages to."""
-        if not interaction.guild:
-            return []
+    # ==================== COMMANDS ====================
 
-        choices = []
-        for channel in interaction.guild.text_channels:
-            perms = channel.permissions_for(interaction.guild.me)
-            if perms.view_channel and perms.send_messages:
-                if current.lower() in channel.name.lower():
-                    label = f"#{channel.name}"
-                    if channel.category:
-                        label = f"#{channel.name} ({channel.category.name})"
-                    choices.append(app_commands.Choice(name=label[:100], value=str(channel.id)))
-
-        choices.sort(key=lambda c: int(c.value))
-        return choices[:25]
-
-    # ==================== STAFF COMMANDS ====================
-
-    @app_commands.command(name="pulse", description="Health monitoring dashboard")
-    @app_commands.guild_only()
-    async def pulse_dashboard(self, interaction: discord.Interaction):
-        """Show health dashboard (mod-only)."""
-        if not await self.is_authorized(interaction):
-            await interaction.response.send_message("You don't have permission to view health status.", ephemeral=True)
+    @commands.hybrid_command(name="pulse", description="Health monitoring dashboard")
+    @commands.guild_only()
+    async def pulse_dashboard(self, ctx: commands.Context):
+        """Show the health dashboard (admin / manage-guild / owner)."""
+        if not await self.is_authorized(ctx):
+            await ctx.send("You don't have permission to view health status.", ephemeral=True)
             return
 
         results = self.service_status
-
         statuses = [r.get("status", "unknown") for r in results.values()]
-        if all(s == "online" for s in statuses):
+        if statuses and all(s == "online" for s in statuses):
             overall = ServiceStatus.ONLINE
         elif any(s == "offline" for s in statuses):
             overall = ServiceStatus.OFFLINE
@@ -551,19 +824,17 @@ class ShadyPulse(commands.Cog):
         embed = discord.Embed(
             title=f"{STATUS_EMOJI[overall]} System Health",
             color=STATUS_COLOR[overall],
-            timestamp=datetime.now(timezone.utc)
+            timestamp=datetime.now(timezone.utc),
         )
 
-        # Bot
         bot_data = results.get("bot", {})
         uptime = self._format_uptime(int((datetime.now(timezone.utc) - self.start_time).total_seconds()))
         embed.add_field(
             name="🤖 Bot",
             value=f"Latency: **{bot_data.get('latency_ms', 0):.0f}ms**\nUptime: **{uptime}**",
-            inline=True
+            inline=True,
         )
 
-        # HTTP
         http_lines = []
         for name, data in results.items():
             if name.startswith("http:"):
@@ -572,7 +843,6 @@ class ShadyPulse(commands.Cog):
         if http_lines:
             embed.add_field(name="🌐 HTTP", value="\n".join(http_lines), inline=True)
 
-        # Cogs
         cog_lines = []
         for name, data in results.items():
             if name.startswith("cog:"):
@@ -584,14 +854,17 @@ class ShadyPulse(commands.Cog):
         if cog_lines:
             embed.add_field(name="🔌 Cogs", value="\n".join(cog_lines), inline=True)
 
-        await interaction.response.send_message(embed=embed)
+        if not results:
+            embed.description = "No checks have run yet — give it one interval."
 
-    @app_commands.command(name="uptime", description="Show bot uptime")
-    @app_commands.guild_only()
-    async def show_uptime(self, interaction: discord.Interaction):
-        """Show uptime (mod-only)."""
-        if not await self.is_authorized(interaction):
-            await interaction.response.send_message("You don't have permission to view uptime.", ephemeral=True)
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="uptime", description="Show bot uptime")
+    @commands.guild_only()
+    async def show_uptime(self, ctx: commands.Context):
+        """Show bot uptime (admin / manage-guild / owner)."""
+        if not await self.is_authorized(ctx):
+            await ctx.send("You don't have permission to view uptime.", ephemeral=True)
             return
 
         uptime = self._format_uptime(int((datetime.now(timezone.utc) - self.start_time).total_seconds()))
@@ -599,194 +872,19 @@ class ShadyPulse(commands.Cog):
         embed.add_field(name="Uptime", value=f"**{uptime}**", inline=True)
         embed.add_field(name="Started", value=f"<t:{int(self.start_time.timestamp())}:F>", inline=True)
         embed.add_field(name="Latency", value=f"**{self.bot.latency * 1000:.0f}ms**", inline=True)
-        await interaction.response.send_message(embed=embed)
+        await ctx.send(embed=embed)
 
-    # ==================== OWNER COMMANDS ====================
-
-    @commands.hybrid_group(name="shadypulse", aliases=["sp"])
+    @commands.hybrid_command(name="shadypulse", aliases=["sp"], description="Open the ShadyPulse control panel")
     @commands.is_owner()
-    async def shadypulse(self, ctx: commands.Context):
-        """Manage health monitoring (Bot Owner only)."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
+    @commands.guild_only()
+    async def shadypulse_panel(self, ctx: commands.Context):
+        """Open the interactive control panel (Bot Owner only).
 
-    @shadypulse.command(name="setup")
-    async def pulse_setup(self, ctx: commands.Context):
-        """Interactive setup."""
+        Everything — settings, cogs, HTTP services, alerts, error history — is
+        managed here. No subcommands to remember.
+        """
         config = await self.config.all()
-
-        embed = discord.Embed(title="⚙️ ShadyPulse Setup", color=discord.Color.blue())
-        embed.add_field(name="Status", value="✅ Enabled" if config["enabled"] else "❌ Disabled", inline=True)
-        embed.add_field(name="Interval", value=f"{config['check_interval_seconds']}s", inline=True)
-        embed.add_field(name="HTTP Services", value=str(len(config["http_services"])), inline=True)
-        embed.add_field(name="Monitored Cogs", value=str(len(config["monitored_cogs"])), inline=True)
-        embed.add_field(name="Auto-Reload", value="✅" if config["cog_auto_reload"] else "❌", inline=True)
-
-        await ctx.send(embed=embed, view=SetupView(self, config), ephemeral=True)
-
-    @shadypulse.command(name="status")
-    async def pulse_status(self, ctx: commands.Context):
-        """Show detailed configuration."""
-        config = await self.config.all()
-
-        embed = discord.Embed(title="⚙️ ShadyPulse Configuration", color=discord.Color.blue())
-        embed.add_field(name="Monitoring", value="✅ Enabled" if config["enabled"] else "❌ Disabled", inline=True)
-        embed.add_field(name="Interval", value=f"{config['check_interval_seconds']}s", inline=True)
-        embed.add_field(name="Alert Channel", value=f"<#{config['alert_channel']}>" if config["alert_channel"] else "Not set", inline=True)
-        embed.add_field(name="HTTP Services", value=str(len(config["http_services"])), inline=True)
-        embed.add_field(name="Monitored Cogs", value=str(len(config["monitored_cogs"])), inline=True)
-
-        auto = f"✅ ({config['cog_max_retries']} retries, {config['cog_retry_cooldown_seconds']}s cooldown)" if config["cog_auto_reload"] else "❌"
-        embed.add_field(name="Auto-Reload", value=auto, inline=False)
-
-        err_alert = "✅" if config.get("alert_on_error", True) else "❌"
-        embed.add_field(
-            name="Error Alerts",
-            value=f"{err_alert} (window {config.get('cog_error_window_seconds', 300)}s)",
-            inline=False,
-        )
-
-        await ctx.send(embed=embed)
-
-    @shadypulse.command(name="alert")
-    @app_commands.describe(channel="Alert channel (bot-visible channels, leave empty to disable)")
-    @app_commands.autocomplete(channel=bot_channel_autocomplete)
-    async def pulse_alert(self, ctx: commands.Context, channel: str = None):
-        """Set alert channel for downtime notifications."""
-        if channel is None:
-            await self.config.alert_channel.set(None)
-            await ctx.send("✅ Alert channel disabled.")
-            return
-
-        try:
-            channel_id = int(channel)
-            ch = ctx.guild.get_channel(channel_id) if ctx.guild else None
-            if not ch:
-                await ctx.send("Channel not found.", ephemeral=True)
-                return
-            await self.config.alert_channel.set(channel_id)
-            await ctx.send(f"✅ Alert channel set to {ch.mention}")
-        except ValueError:
-            await ctx.send("Invalid channel.", ephemeral=True)
-
-    @shadypulse.command(name="autoreload")
-    @app_commands.describe(enabled="Enable or disable cog auto-reload")
-    async def pulse_autoreload(self, ctx: commands.Context, enabled: bool):
-        """Toggle cog auto-reload."""
-        await self.config.cog_auto_reload.set(enabled)
-        await ctx.send(f"Cog auto-reload: {'Enabled' if enabled else 'Disabled'}")
-
-    @shadypulse.command(name="removehttp")
-    @app_commands.describe(name="HTTP service name to remove")
-    async def pulse_removehttp(self, ctx: commands.Context, name: str):
-        """Remove an HTTP service."""
-        async with self.config.http_services() as services:
-            if name not in services:
-                await ctx.send(f"Service `{name}` not found.")
-                return
-            del services[name]
-        await ctx.send(f"✅ Removed `{name}`")
-
-    @shadypulse.command(name="removecog")
-    @app_commands.describe(name="Cog name to stop monitoring")
-    async def pulse_removecog(self, ctx: commands.Context, name: str):
-        """Remove a cog from monitoring."""
-        async with self.config.monitored_cogs() as cogs:
-            if name not in cogs:
-                await ctx.send(f"Cog `{name}` not monitored.")
-                return
-            del cogs[name]
-        await ctx.send(f"✅ Stopped monitoring `{name}`")
-
-    @shadypulse.command(name="alerterrors")
-    @app_commands.describe(enabled="Alert the channel when a command throws an exception")
-    async def pulse_alerterrors(self, ctx: commands.Context, enabled: bool):
-        """Toggle immediate alerts on captured command errors."""
-        await self.config.alert_on_error.set(enabled)
-        await ctx.send(f"Command-error alerts: {'Enabled' if enabled else 'Disabled'}")
-
-    @shadypulse.command(name="errors")
-    @app_commands.describe(name="Cog name to show the last traceback for (omit for a summary)")
-    async def pulse_errors(self, ctx: commands.Context, name: str = None):
-        """Show captured command errors and tracebacks."""
-        if not self.cog_errors:
-            await ctx.send("No command errors captured since last reload. ✅")
-            return
-
-        if name:
-            rec = self.cog_errors.get(name)
-            if not rec or not rec["last_error"]:
-                await ctx.send(f"No errors captured for `{name}`.")
-                return
-            e = rec["last_error"]
-            embed = discord.Embed(
-                title=f"⚠️ Last error in {name}",
-                color=discord.Color.orange(),
-                timestamp=datetime.fromisoformat(e["timestamp"]),
-            )
-            embed.add_field(name="Command", value=f"`{e['command']}`", inline=True)
-            embed.add_field(name="Type", value=f"`{e['type']}`", inline=True)
-            embed.add_field(name="Total Errors", value=str(rec["count"]), inline=True)
-            embed.add_field(name="Message", value=f"```{e['message'][:400]}```", inline=False)
-            tb = e["traceback"]
-            if len(tb) > 1400:
-                tb = "...\n" + tb[-1400:]
-            embed.add_field(name="Traceback", value=f"```py\n{tb}```", inline=False)
-            await ctx.send(embed=embed)
-            return
-
-        lines = []
-        for k, rec in self.cog_errors.items():
-            le = rec["last_error"]
-            if le:
-                lines.append(f"• `{k}` — {rec['count']} error(s), last: `{le['type']}` in `{le['command']}`")
-        embed = discord.Embed(
-            title="⚠️ Captured Command Errors",
-            description="\n".join(lines) or "None",
-            color=discord.Color.orange(),
-        )
-        embed.set_footer(text="Use [p]shadypulse errors <CogName> for the full traceback")
-        await ctx.send(embed=embed)
-
-    @shadypulse.command(name="clearerrors")
-    @app_commands.describe(name="Cog name to clear (omit to clear all)")
-    async def pulse_clearerrors(self, ctx: commands.Context, name: str = None):
-        """Clear captured error history."""
-        if name:
-            if name in self.cog_errors:
-                del self.cog_errors[name]
-                self._last_error_alert.pop(name, None)
-                await ctx.send(f"✅ Cleared errors for `{name}`.")
-            else:
-                await ctx.send(f"No errors recorded for `{name}`.")
-            return
-        self.cog_errors.clear()
-        self._last_error_alert.clear()
-        await ctx.send("✅ Cleared all captured errors.")
-
-    @shadypulse.command(name="list")
-    async def pulse_list(self, ctx: commands.Context):
-        """List all monitored services."""
-        config = await self.config.all()
-
-        embed = discord.Embed(title="📋 Monitored Services", color=discord.Color.blue())
-
-        if config["http_services"]:
-            http_list = "\n".join([f"• `{n}`: {c['url']}" for n, c in config["http_services"].items()])
-            embed.add_field(name="🌐 HTTP Services", value=http_list, inline=False)
-        else:
-            embed.add_field(name="🌐 HTTP Services", value="None", inline=False)
-
-        if config["monitored_cogs"]:
-            cog_list = "\n".join([
-                f"• `{n}` {'(auto-reload)' if c.get('extension_name') else ''}"
-                for n, c in config["monitored_cogs"].items()
-            ])
-            embed.add_field(name="🔌 Monitored Cogs", value=cog_list, inline=False)
-        else:
-            embed.add_field(name="🔌 Monitored Cogs", value="None", inline=False)
-
-        await ctx.send(embed=embed)
+        await ctx.send(embed=build_panel_embed(config), view=PanelView(self), ephemeral=True)
 
 
 async def setup(bot: Red) -> None:

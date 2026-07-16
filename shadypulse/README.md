@@ -17,36 +17,32 @@ exceptions are captured at the backend and their tracebacks snapshotted.
 
 ## Commands
 
-### Staff Commands (Admin / Manage Guild / Owner)
+Three commands total — everything else is in the panel.
 
-| Command | Description |
-|---------|-------------|
-| `/pulse` | Health dashboard for all monitored services (shows ⚠️ + error counts) |
-| `/uptime` | Show bot uptime |
+| Command | Who | Description |
+|---------|-----|-------------|
+| `[p]pulse` | Admin / Manage Guild / Owner | Health dashboard (⚠️ + error counts); also `/pulse` after slash sync |
+| `[p]uptime` | Admin / Manage Guild / Owner | Bot uptime; also `/uptime` after slash sync |
+| `[p]shadypulse` (alias `[p]sp`) | Owner | Open the interactive control panel |
 
-### Owner Commands
+## Control Panel
 
-| Command | Description |
-|---------|-------------|
-| `[p]shadypulse setup` | Interactive setup panel (Settings / Add HTTP / Add Cog / Enable / Disable) |
-| `[p]shadypulse status` | Show current configuration |
-| `[p]shadypulse list` | List monitored HTTP services and cogs |
-| `[p]shadypulse alert <channel>` | Set the downtime/error alert channel (empty to disable) |
-| `[p]shadypulse autoreload <true/false>` | Enable/disable auto-reload on cog failure |
-| `[p]shadypulse alerterrors <true/false>` | Enable/disable alerts when a command throws |
-| `[p]shadypulse errors [CogName]` | Error summary, or the last full traceback for one cog |
-| `[p]shadypulse clearerrors [CogName]` | Clear captured error history |
-| `[p]shadypulse removehttp <name>` | Remove an HTTP service |
-| `[p]shadypulse removecog <name>` | Stop monitoring a cog |
+`[p]shadypulse` opens one panel with buttons — no subcommands:
+
+- **⚙️ Settings** — interval, reload retries/cooldown, error window.
+- **🔌 Cogs** — add cogs to monitor from a **dropdown of the bot's loaded cogs**
+  (extension path auto-resolved), or remove them. Paginated past 25 cogs.
+- **🌐 HTTP** — add/remove HTTP services.
+- **🔔 Alerts** — set the alert channel (dropdown) and toggle error alerts.
+- **⚠️ Errors** — browse captured errors and tracebacks; clear history.
+- **▶️ Toggle Monitoring** / **🔄 Toggle Auto-Reload**.
 
 ## Setup
 
-1. Load the cog: `[p]load shadypulse`
-2. Open the panel: `[p]shadypulse setup`
-   - **Add HTTP** — name + URL + expected status code + timeout.
-   - **Add Cog** — cog class name (e.g. `LevelUp`) and optional extension path
-     (e.g. `mycogs.levelup`) for auto-reload.
-3. Set an alert channel: `[p]shadypulse alert #alerts`
+```
+[p]load shadypulse
+[p]shadypulse   → 🔌 Cogs (pick from dropdown) → 🔄 Toggle Auto-Reload → 🔔 Alerts (set channel)
+```
 
 ## Features
 
