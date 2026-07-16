@@ -760,14 +760,7 @@ class ShadyPulse(commands.Cog):
         reason = "unloaded" if status == ServiceStatus.OFFLINE else "command errors"
 
         try:
-            # reload_extension requires the extension to be currently loaded. If
-            # it was fully unloaded (Offline), load it fresh instead.
-            if ext in self.bot.extensions:
-                await self.bot.reload_extension(ext)
-                verb = "Reloaded"
-            else:
-                await self.bot.load_extension(ext)
-                verb = "Loaded"
+            verb = await self._reload_or_load(ext)
             # Mark the (re)load time so pre-reload errors stop counting as recent.
             self._reloaded_at[cog_name] = now
             log.info(f"{verb} {cog_name} ({reason}), attempt {attempt}/{max_retries}")
@@ -785,6 +778,29 @@ class ShadyPulse(commands.Cog):
                 color=discord.Color.red(),
                 timestamp=now,
             ))
+
+    async def _reload_or_load(self, ext: str) -> str:
+        """(Re)load a cog package the way Red's [p]load / [p]reload do.
+
+        Red overrides load_extension to take a ModuleSpec (not a name), so we
+        resolve the spec through the cog manager. Returns "Reloaded" if it was
+        already loaded, "Loaded" if it was fully unloaded. Raises on failure.
+        """
+        was_loaded = ext in self.bot.extensions
+        if was_loaded:
+            await self.bot.unload_extension(ext)
+
+        cog_mgr = getattr(self.bot, "_cog_mgr", None)
+        if cog_mgr is not None:
+            spec = await cog_mgr.find_cog(ext)
+            if spec is None:
+                raise ValueError(f"Cog package '{ext}' not found by the cog manager")
+            await self.bot.load_extension(spec)
+        else:
+            # Non-Red fallback (discord.py's string-based loader).
+            await self.bot.load_extension(ext)
+
+        return "Reloaded" if was_loaded else "Loaded"
 
     def _format_uptime(self, seconds: int) -> str:
         d, h, m = seconds // 86400, (seconds % 86400) // 3600, (seconds % 3600) // 60
